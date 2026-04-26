@@ -18,8 +18,8 @@ const StatCard = ({ title, value, unit, icon, iconBgColor, iconColor }: StatCard
       </View>
       <View>
         <Text style={styles.value}>
-          {value} <Text style={styles.unit}>{unit}</Text>
-        </Text>
+  {value}{unit ? ` ${unit}` : ''}
+</Text>
         <Text style={styles.title}>{title}</Text>
       </View>
     </View>

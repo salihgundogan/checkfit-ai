@@ -6,6 +6,13 @@ const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
  *
  * @type {import('@react-native/metro-config').MetroConfig}
  */
-const config = {};
+const defaultConfig = getDefaultConfig(__dirname);
 
-module.exports = mergeConfig(getDefaultConfig(__dirname), config);
+const config = {
+  resolver: {
+    // Mevcut asset uzantılarına 'onnx' uzantısını ekliyoruz
+    assetExts: [...defaultConfig.resolver.assetExts, 'onnx'],
+  },
+};
+
+module.exports = mergeConfig(defaultConfig, config);

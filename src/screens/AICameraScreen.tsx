@@ -1,92 +1,132 @@
 import React from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, StatusBar, ImageBackground } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { 
+  View, 
+  Text, 
+  StyleSheet, 
+  SafeAreaView, 
+  StatusBar, 
+  TouchableOpacity,
+  Alert 
+} from 'react-native';
 
-import CameraOverlay from '../components/CameraOverlay';
-import AnalysisBottomSheet from '../components/AnalysisBottomSheet';
+import Icon from 'react-native-vector-icons/MaterialIcons';
+import { launchCamera, launchImageLibrary, ImagePickerResponse } from 'react-native-image-picker';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import SelectionCard from '../components/SelectionCard';
+import ManualSearchButton from '../components/ManualSearchButton';
 
-const AICameraScreen = () => {
-  const navigation = useNavigation();
+type RootStackParamList = {
+  AICamera: undefined;
+  ManualEntry: undefined;
+  Analysis: { imageUri: string };
+};
+
+type Props = NativeStackScreenProps<RootStackParamList, 'AICamera'>;
+
+const AICameraScreen: React.FC<Props> = ({ navigation }) => {
+
+  const handleCamera = (): void => {
+    launchCamera({
+      mediaType: 'photo',
+      quality: 0.8, // Boyutu optimize etmek için biraz düşürdük
+      saveToPhotos: true,
+    }, (response: ImagePickerResponse) => {
+      if (response.didCancel) return;
+      if (response.errorCode) {
+        Alert.alert('Hata', response.errorMessage || 'Kamera açılamadı');
+      } else if (response.assets && response.assets[0].uri) {
+        navigation.navigate('Analysis', { imageUri: response.assets[0].uri });
+      }
+    });
+  };
+
+  const handleGallery = (): void => {
+    launchImageLibrary({
+      mediaType: 'photo',
+      quality: 0.8,
+    }, (response: ImagePickerResponse) => {
+      if (response.didCancel) return;
+      if (response.errorCode) {
+        Alert.alert('Hata', response.errorMessage || 'Galeri açılamadı');
+      } else if (response.assets && response.assets[0].uri) {
+        navigation.navigate('Analysis', { imageUri: response.assets[0].uri });
+      }
+    });
+  };
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f6f8f6" />
-      
+      <StatusBar barStyle="dark-content" backgroundColor="#F9FAF5" />
+
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-           <Text style={styles.backIcon}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Öğününü Tanı</Text>
         <View style={{ width: 40 }} /> 
+        <Text style={styles.headerTitle}>Öğün Ekle</Text>
+        <TouchableOpacity 
+          onPress={() => navigation.goBack()} 
+          style={styles.closeButton}
+          activeOpacity={0.7}
+        >
+          <Icon name="close" size={26} color="#475569" />
+        </TouchableOpacity>
       </View>
 
-      {/* Main Content */}
       <View style={styles.content}>
-        {/* Kamera/Resim Alanı */}
-        <View style={styles.cameraContainer}>
-          <ImageBackground 
-            source={{ uri: 'https://images.unsplash.com/photo-1529042410759-befb72002f40?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80' }} // Örnek yemek resmi
-            style={styles.imageBackground}
-            imageStyle={{ borderRadius: 24 }}
-          >
-             <CameraOverlay />
-          </ImageBackground>
+        <View style={styles.grid}>
+          <SelectionCard 
+            title="Fotoğraf Çek" 
+            iconName="photo-camera" 
+            onPress={handleCamera} 
+          />
+          <SelectionCard 
+            title="Galeriden Seç" 
+            iconName="image" 
+            onPress={handleGallery} 
+          />
         </View>
-      </View>
 
-      {/* Alt Panel - Absolute positioned */}
-      <View style={styles.bottomSheetContainer}>
-        <AnalysisBottomSheet />
-      </View>
+        <View style={styles.separator}>
+          <View style={styles.line} />
+          <Text style={styles.separatorText}>VEYA</Text>
+          <View style={styles.line} />
+        </View>
 
+        <ManualSearchButton onPress={() => navigation.navigate('ManualEntry')} />
+      </View>
+      
+      <View style={{ height: 40 }} />
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f6f8f6' },
+  container: { flex: 1, backgroundColor: '#F9FAF5' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    zIndex: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 15,
   },
-  backButton: {
+  headerTitle: { fontSize: 20, fontWeight: '700', color: '#1e293b' },
+  closeButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
+    borderRadius: 20,
     backgroundColor: 'rgba(0,0,0,0.05)',
   },
-  backIcon: { fontSize: 24, fontWeight: 'bold', color: '#1e293b' },
-  title: { fontSize: 18, fontWeight: 'bold', color: '#0f172a' },
-  
-  content: { flex: 1, padding: 16, paddingBottom: 0 },
-  cameraContainer: {
-    flex: 1,
-    marginBottom: 80, // Bottom sheet için yer bırak
-    borderRadius: 24,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 8,
-    backgroundColor: '#000',
+  content: { flex: 1, paddingHorizontal: 24, justifyContent: 'center' },
+  grid: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    marginBottom: 35,
+    gap: 15 // Kartlar arası boşluk
   },
-  imageBackground: { width: '100%', height: '100%' },
-  
-  bottomSheetContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    zIndex: 20,
-  },
+  separator: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+  line: { flex: 1, height: 1, backgroundColor: '#e2e8f0' },
+  separatorText: { paddingHorizontal: 15, fontSize: 12, fontWeight: '700', color: '#94a3b8' },
 });
 
 export default AICameraScreen;

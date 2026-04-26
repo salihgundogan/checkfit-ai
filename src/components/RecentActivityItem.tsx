@@ -7,6 +7,7 @@ interface ActivityProps {
   icon: string;
   iconBg: string;
   iconColor: string;
+  iconBgColor: string
 }
 
 const RecentActivityItem = ({ title, subtitle, icon, iconBg, iconColor }: ActivityProps) => {

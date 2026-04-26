@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { 
   View, 
   Text, 
@@ -7,282 +7,596 @@ import {
   Image, 
   TouchableOpacity, 
   StatusBar,
-  Alert 
+  Dimensions,
+  Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
-// Supabase
+// Supabase Bağlantısı
 import { supabase } from '../lib/supabase';
 
-// Componentler
+// Bileşenler
 import MacroCard from '../components/MacroCard';
 import MealCard from '../components/MealCard';
 
+const { width } = Dimensions.get('window');
+
 const DashboardScreen = () => {
   const navigation = useNavigation<any>();
+  
   const [userName, setUserName] = useState('Misafir');
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null); // ✅ GERÇEK AVATAR
   const [loading, setLoading] = useState(true);
+  const [dailyStats, setDailyStats] = useState({ cal: 0, protein: 0, carbs: 0, fat: 0 });
+  const [greeting, setGreeting] = useState('Merhaba');
+  
+  // Hedef Değerler
+  const CALORIE_TARGET = 2000;
+  const PROTEIN_TARGET = 150;
+  const CARBS_TARGET = 250;
+  const FAT_TARGET = 70;
 
-  // Kullanıcı Bilgisini Çekme
+  // Günün saatine göre selamlama
   useEffect(() => {
-    fetchUserProfile();
+    const hour = new Date().getHours();
+    if (hour < 12) setGreeting('Günaydın');
+    else if (hour < 18) setGreeting('İyi günler');
+    else setGreeting('İyi akşamlar');
   }, []);
 
-  const fetchUserProfile = async () => {
+  // ✅ Kullanıcı profilini + avatar_url çekme
+  const fetchUserProfile = useCallback(async () => {
     try {
-      // 1. Mevcut oturumu al
       const { data: { user } } = await supabase.auth.getUser();
-      
       if (user) {
-        // 2. Profiles tablosundan ismi çek
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('profiles')
-          .select('pref_name')
+          .select('pref_name, avatar_url') // avatar_url eklendi
           .eq('id', user.id)
           .single();
 
-        if (data) {
-          setUserName(data.pref_name);
-        }
+        if (data?.pref_name) setUserName(data.pref_name);
+        if (data?.avatar_url) setAvatarUrl(data.avatar_url); // ✅ gerçek resim
       }
     } catch (error) {
-      console.log('Profil yükleme hatası:', error);
+      console.error('Profil yükleme hatası:', error);
+    }
+  }, []);
+
+  // Günlük yemek loglarını çekme
+  const fetchDailyLogs = useCallback(async () => {
+    try {
+      setLoading(true);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date();
+      endOfDay.setHours(23, 59, 59, 999);
+
+      const isoStart = startOfDay.toISOString();
+      const isoEnd = endOfDay.toISOString();
+
+      const [mealsResponse, logsResponse] = await Promise.all([
+        supabase
+          .from('meals')
+          .select('calories, protein, carbs, fat')
+          .eq('user_id', user.id)
+          .gte('created_at', isoStart)
+          .lte('created_at', isoEnd),
+        supabase
+          .from('food_logs')
+          .select('calories, protein, carbs, fat')
+          .eq('user_id', user.id)
+          .gte('created_at', isoStart)
+          .lte('created_at', isoEnd)
+      ]);
+
+      const combineData = (acc: any, curr: any) => ({
+        cal: acc.cal + (Number(curr.calories) || 0),
+        protein: acc.protein + (Number(curr.protein) || 0),
+        carbs: acc.carbs + (Number(curr.carbs) || 0),
+        fat: acc.fat + (Number(curr.fat) || 0),
+      });
+
+      const mealsTotals = (mealsResponse.data || []).reduce(combineData, { cal: 0, protein: 0, carbs: 0, fat: 0 });
+      const logsTotals = (logsResponse.data || []).reduce(combineData, { cal: 0, protein: 0, carbs: 0, fat: 0 });
+
+      setDailyStats({
+        cal: mealsTotals.cal + logsTotals.cal,
+        protein: mealsTotals.protein + logsTotals.protein,
+        carbs: mealsTotals.carbs + logsTotals.carbs,
+        fat: mealsTotals.fat + logsTotals.fat,
+      });
+
+    } catch (error) {
+      console.error('Log çekme hatası:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchUserProfile();
+      fetchDailyLogs();
+    }, [fetchUserProfile, fetchDailyLogs])
+  );
+
+  const remainingCalories = Math.max(0, CALORIE_TARGET - dailyStats.cal);
+  const fillPercentage = Math.min(1, dailyStats.cal / CALORIE_TARGET);
+
+  // Yarım daire progress hesabı
+  const isOverLimit = dailyStats.cal >= CALORIE_TARGET;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f6f8f6" />
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <StatusBar barStyle="dark-content" backgroundColor="#f0f7f1" />
       
-      {/* --- SCROLL CONTENT --- */}
       <ScrollView 
         contentContainerStyle={styles.scrollContent} 
         showsVerticalScrollIndicator={false}
       >
-        
-        {/* 1. HEADER (Dinamik İsim) */}
+        {/* ── HEADER ── */}
         <View style={styles.header}>
-          <View>
-            <Text style={styles.greetingText}>Hoş geldin,</Text>
-            {/* Supabase'den gelen isim burada yazıyor */}
+          <View style={styles.headerLeft}>
+            <Text style={styles.greetingText}>{greeting} 👋</Text>
             <Text style={styles.userName}>
-              {loading ? 'Yükleniyor...' : `Merhaba ${userName}!`}
+              {loading && dailyStats.cal === 0 ? '...' : userName}
             </Text>
           </View>
+
+          {/* ✅ GERÇEK PROFİL RESMİ */}
           <TouchableOpacity 
             style={styles.profileButton}
-            onPress={() => navigation.navigate('Profile')} // Profile git
+            onPress={() => navigation.navigate('Profile')}
+            activeOpacity={0.85}
           >
-            <Image 
-              source={{ uri: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=687&q=80' }} 
-              style={styles.profileImage} 
-            />
+            {avatarUrl ? (
+              <Image 
+                source={{ uri: avatarUrl }} 
+                style={styles.profileImage}
+              />
+            ) : (
+              // Avatar yoksa baş harfi göster
+              <View style={styles.profilePlaceholder}>
+                <Text style={styles.profileInitial}>
+                  {userName?.charAt(0)?.toUpperCase() || 'U'}
+                </Text>
+              </View>
+            )}
             <View style={styles.onlineIndicator} />
           </TouchableOpacity>
         </View>
 
-        {/* 2. KALORİ HALKASI */}
-        <View style={styles.ringSection}>
-          <View style={styles.outerRing}>
-            <View style={styles.innerRing}>
-              <View style={styles.ringContent}>
-                <Text style={styles.ringValue}>1,250</Text>
-                <Text style={styles.ringLabel}>KCAL KALDI</Text>
-                <View style={styles.ringTargetBadge}>
-                  <Text style={styles.ringTargetText}>Hedef: 2,000</Text>
-                </View>
+        {/* ── TARİH ŞERIDI ── */}
+        <View style={styles.dateStrip}>
+          <Text style={styles.dateText}>
+            {new Date().toLocaleDateString('tr-TR', { weekday: 'long', day: 'numeric', month: 'long' })}
+          </Text>
+          <View style={styles.dateBadge}>
+            <Text style={styles.dateBadgeText}>Bugün</Text>
+          </View>
+        </View>
+
+        {/* ── KALORİ KARTİ ── */}
+        <View style={styles.calorieCard}>
+          {/* Sol bilgi */}
+          <View style={styles.calorieLeft}>
+            <View style={styles.calorieStatBox}>
+              <Text style={styles.calorieStatLabel}>Alınan</Text>
+              <Text style={styles.calorieStatValue}>{dailyStats.cal.toLocaleString()}</Text>
+              <Text style={styles.calorieStatUnit}>kcal</Text>
+            </View>
+            <View style={styles.calorieDivider} />
+            <View style={styles.calorieStatBox}>
+              <Text style={styles.calorieStatLabel}>Hedef</Text>
+              <Text style={styles.calorieStatValue}>{CALORIE_TARGET.toLocaleString()}</Text>
+              <Text style={styles.calorieStatUnit}>kcal</Text>
+            </View>
+          </View>
+
+          {/* Sağ – Halka */}
+          <View style={styles.ringWrapper}>
+            <View style={[styles.ringOuter, isOverLimit && styles.ringOuterOver]}>
+              <View style={styles.ringInner}>
+                <Text style={[styles.ringMainValue, isOverLimit && { color: '#ef4444' }]}>
+                  {remainingCalories.toLocaleString()}
+                </Text>
+                <Text style={styles.ringMainLabel}>kalan</Text>
               </View>
             </View>
+            {/* Progress arc – basit çizgisel gösterim */}
+            <View style={styles.ringProgressTrack}>
+              <View style={[styles.ringProgressFill, { width: `${Math.round(fillPercentage * 100)}%`, backgroundColor: isOverLimit ? '#ef4444' : '#13ec22' }]} />
+            </View>
+            <Text style={styles.ringProgressPercent}>
+              %{Math.round(fillPercentage * 100)}
+            </Text>
           </View>
         </View>
 
-        {/* 3. MAKRO BİLGİLERİ */}
-        <View style={styles.macroContainer}>
-          <MacroCard 
-            title="Karb" value="128g" percentage={65} 
-            color="#3b82f6" iconCharacter="🌾" 
+        {/* ── MAKROLAR ── */}
+        <View style={styles.macroRow}>
+          <MacroTile
+            emoji="🌾"
+            label="Karb"
+            value={dailyStats.carbs.toFixed(0)}
+            target={CARBS_TARGET}
+            color="#3b82f6"
           />
-          <MacroCard 
-            title="Protein" value="95g" percentage={80} 
-            color="#13ec22" iconCharacter="🥚" 
+          <MacroTile
+            emoji="🥚"
+            label="Protein"
+            value={dailyStats.protein.toFixed(0)}
+            target={PROTEIN_TARGET}
+            color="#13ec22"
           />
-          <MacroCard 
-            title="Yağ" value="45g" percentage={45} 
-            color="#f97316" iconCharacter="💧" 
+          <MacroTile
+            emoji="💧"
+            label="Yağ"
+            value={dailyStats.fat.toFixed(0)}
+            target={FAT_TARGET}
+            color="#f97316"
           />
         </View>
 
-        {/* 4. BUGÜNKÜ ÖĞÜNLER */}
+        {/* ── BUGÜNKÜ AKTİVİTE ── */}
         <View style={styles.mealsSection}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Bugünkü Öğünler</Text>
-            <TouchableOpacity>
-               <Text style={styles.seeAllText}>Tümünü Gör</Text>
+            <Text style={styles.sectionTitle}>Bugünkü Aktivite</Text>
+            <TouchableOpacity 
+              style={styles.seeAllBtn}
+              onPress={() => navigation.navigate('Progress')}
+            >
+              <Text style={styles.seeAllText}>Geçmiş →</Text>
             </TouchableOpacity>
           </View>
 
-          <MealCard 
-            mealType="Kahvaltı"
-            foodName="Yulaf ve Meyveler"
-            calories={350}
-            imageSource={{ uri: 'https://images.unsplash.com/photo-1517673132405-a56a62b18caf?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80' }}
-          />
-
-          <MealCard 
-            mealType="Öğle Yemeği"
-            foodName="Izgara Tavuk Salatası"
-            calories={450}
-            imageSource={{ uri: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80' }}
-          />
-
-          <MealCard 
-            mealType="Akşam Yemeği"
-            isEmpty={true}
-            onAddPress={() => console.log('Yemek Ekle')}
-          />
+          {dailyStats.cal > 0 ? (
+            <MealCard 
+              mealType="Günlük Özet"
+              foodName="AI Analiz ve Manuel Kayıtlar"
+              calories={dailyStats.cal}
+              imageSource={{ uri: 'https://images.unsplash.com/photo-1490645935967-10de6ba17061?auto=format&fit=crop&w=800&q=80' }}
+            />
+          ) : (
+            <MealCard 
+              mealType="Henüz Kayıt Yok"
+              isEmpty={true}
+              onAddPress={() => navigation.navigate('AICamera')}
+            />
+          )}
         </View>
 
-        <View style={{ height: 100 }} />
+        {/* ── HIZLI EYLEMLER ── */}
+        <View style={styles.quickActions}>
+          <TouchableOpacity 
+            style={[styles.quickBtn, { backgroundColor: '#e8fde9' }]}
+            onPress={() => navigation.navigate('AICamera')}
+          >
+            <Text style={styles.quickBtnEmoji}>📸</Text>
+            <Text style={[styles.quickBtnLabel, { color: '#15803d' }]}>Fotoğrafla Ekle</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.quickBtn, { backgroundColor: '#eff6ff' }]}
+            onPress={() => navigation.navigate('Progress')}
+          >
+            <Text style={styles.quickBtnEmoji}>📊</Text>
+            <Text style={[styles.quickBtnLabel, { color: '#1d4ed8' }]}>İlerlemeyi Gör</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ height: 110 }} />
       </ScrollView>
 
-      {/* 5.  BOTTOM BAR */}
+      {/* ── FLOATING BOTTOM BAR ── */}
       <View style={styles.bottomBarWrapper}>
         <View style={styles.bottomBar}>
-            {/* Aktif Tab: Home */}
-            <TouchableOpacity style={styles.navItemActive}>
-                <View style={styles.activeIconBg}>
-                    <Text style={styles.navIconActive}>🏠</Text>
-                </View>
-                <Text style={styles.navTextActive}>Ana Sayfa</Text>
-            </TouchableOpacity>
 
-            <TouchableOpacity style={styles.navItem}  onPress={() => navigation.navigate('Progress')} >
-                <Text style={styles.navIcon}>📜</Text>
-                <Text style={styles.navText}>Geçmiş</Text>
-            </TouchableOpacity>
+          <NavItem 
+            icon="🏠" 
+            label="Ana Sayfa" 
+            active 
+          />
 
-            {/* Orta Kamera Butonu (Yüzen) */}
-            <View style={styles.cameraContainer}>
-                <TouchableOpacity style={styles.cameraButton}   onPress={() => navigation.navigate('AICamera')} // Yönlendirme
->
-                    <Text style={{ fontSize: 28 }}>📸</Text>
-                </TouchableOpacity>
+          <NavItem 
+            icon="📜" 
+            label="Geçmiş" 
+            onPress={() => navigation.navigate('Progress')} 
+          />
+
+          {/* Kamera merkez butonu */}
+          <TouchableOpacity 
+            style={styles.cameraButton} 
+            onPress={() => navigation.navigate('AICamera')}
+            activeOpacity={0.85}
+          >
+            <View style={styles.cameraButtonInner}>
+              <Text style={styles.cameraIcon}>📸</Text>
             </View>
+          </TouchableOpacity>
 
-            <TouchableOpacity style={styles.navItem}>
-                <Text style={styles.navIcon}>🤖</Text>
-                <Text style={styles.navText}>Asistan</Text>
-            </TouchableOpacity>
+          <NavItem 
+            icon="🤖" 
+            label="Asistan" 
+          />
 
-            <TouchableOpacity 
-                style={styles.navItem} 
-                onPress={() => navigation.navigate('Profile')}
-            >
-                <Text style={styles.navIcon}>👤</Text>
-                <Text style={styles.navText}>Profil</Text>
-            </TouchableOpacity>
+          <NavItem 
+            icon="👤" 
+            label="Profil" 
+            onPress={() => navigation.navigate('Profile')} 
+          />
+
         </View>
       </View>
-
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f6f8f6' },
-  scrollContent: { padding: 24 },
-  
-  // HEADER
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
-  greetingText: { fontSize: 14, color: '#6b7280', fontWeight: '500' },
-  userName: { fontSize: 24, fontWeight: 'bold', color: '#0d1b0e' },
-  profileButton: { padding: 2, borderWidth: 2, borderColor: '#ffffff', borderRadius: 24, shadowColor: "#13ec22", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.2, shadowRadius: 10 },
-  profileImage: { width: 48, height: 48, borderRadius: 24 },
-  onlineIndicator: { position: 'absolute', bottom: 0, right: 0, width: 12, height: 12, backgroundColor: '#13ec22', borderRadius: 6, borderWidth: 2, borderColor: '#ffffff' },
-  
-  // RING & MACRO
-  ringSection: { alignItems: 'center', marginVertical: 12 },
-  outerRing: { width: 220, height: 220, borderRadius: 110, borderWidth: 20, borderColor: '#e2e8e2', justifyContent: 'center', alignItems: 'center', borderTopColor: '#13ec22', borderRightColor: '#13ec22', transform: [{ rotate: '-45deg' }] },
-  innerRing: { width: 180, height: 180, justifyContent: 'center', alignItems: 'center', transform: [{ rotate: '45deg' }] },
-  ringContent: { alignItems: 'center' },
-  ringValue: { fontSize: 40, fontWeight: 'bold', color: '#111811' },
-  ringLabel: { fontSize: 12, color: '#6b7280', fontWeight: '600', letterSpacing: 1, marginTop: 4 },
-  ringTargetBadge: { marginTop: 8, backgroundColor: '#e7fce9', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 20 },
-  ringTargetText: { fontSize: 12, color: '#15803d', fontWeight: '600' },
-  macroContainer: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 24, marginTop: 24 },
-  
-  // MEALS
-  mealsSection: { flex: 1 },
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#0d1b0e' },
-  seeAllText: { fontSize: 12, color: '#13ec22', fontWeight: '600' },
+// ── YARDIMCI BİLEŞENLER ──
 
-  //  BOTTOM BAR
-  bottomBarWrapper: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
+const MacroTile = ({ emoji, label, value, target, color }: {
+  emoji: string; label: string; value: string; target: number; color: string;
+}) => {
+  const pct = Math.min(1, Number(value) / target);
+  return (
+    <View style={macroStyles.tile}>
+      <View style={[macroStyles.iconBox, { backgroundColor: color + '18' }]}>
+        <Text style={macroStyles.emoji}>{emoji}</Text>
+      </View>
+      <Text style={macroStyles.label}>{label}</Text>
+      <Text style={macroStyles.value}>{value}<Text style={macroStyles.unit}>g</Text></Text>
+      <View style={macroStyles.track}>
+        <View style={[macroStyles.fill, { width: `${Math.round(pct * 100)}%`, backgroundColor: color }]} />
+      </View>
+      <Text style={[macroStyles.pct, { color }]}>{Math.round(pct * 100)}%</Text>
+    </View>
+  );
+};
+
+const NavItem = ({ icon, label, active, onPress }: {
+  icon: string; label: string; active?: boolean; onPress?: () => void;
+}) => (
+  <TouchableOpacity 
+    style={navStyles.item} 
+    onPress={onPress} 
+    activeOpacity={0.7}
+  >
+    {active ? (
+      <View style={navStyles.activeBg}>
+        <Text style={navStyles.activeIcon}>{icon}</Text>
+      </View>
+    ) : (
+      <Text style={navStyles.icon}>{icon}</Text>
+    )}
+    <Text style={[navStyles.label, active && navStyles.labelActive]}>{label}</Text>
+  </TouchableOpacity>
+);
+
+// ── STİLLER ──
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#f0f7f1' },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 8 },
+
+  // Header
+  header: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    alignItems: 'center', 
+    marginBottom: 12,
   },
+  headerLeft: {},
+  greetingText: { fontSize: 13, color: '#6b7280', fontWeight: '500', letterSpacing: 0.3 },
+  userName: { fontSize: 24, fontWeight: '800', color: '#0d1b0e', letterSpacing: -0.5 },
+
+  profileButton: { 
+    borderRadius: 28, 
+    borderWidth: 3, 
+    borderColor: '#13ec22',
+    shadowColor: '#13ec22',
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  profileImage: { width: 52, height: 52, borderRadius: 26 },
+  profilePlaceholder: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#13ec22',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  profileInitial: { fontSize: 22, fontWeight: '800', color: '#fff' },
+  onlineIndicator: { 
+    position: 'absolute', bottom: 1, right: 1, 
+    width: 13, height: 13, 
+    backgroundColor: '#13ec22', 
+    borderRadius: 7, 
+    borderWidth: 2.5, 
+    borderColor: '#f0f7f1',
+  },
+
+  // Tarih şeridi
+  dateStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  dateText: { fontSize: 13, color: '#6b7280', fontWeight: '500', textTransform: 'capitalize' },
+  dateBadge: {
+    backgroundColor: '#13ec22',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 20,
+  },
+  dateBadgeText: { fontSize: 11, fontWeight: '800', color: '#0d1b0e' },
+
+  // Kalori kartı
+  calorieCard: {
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: '#e8f5ea',
+  },
+  calorieLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  calorieStatBox: { alignItems: 'center' },
+  calorieStatLabel: { fontSize: 11, color: '#9ca3af', fontWeight: '600', marginBottom: 2 },
+  calorieStatValue: { fontSize: 22, fontWeight: '900', color: '#111811' },
+  calorieStatUnit: { fontSize: 10, color: '#9ca3af', fontWeight: '600' },
+  calorieDivider: { width: 1, height: 36, backgroundColor: '#f0f0f0' },
+
+  ringWrapper: { alignItems: 'center', minWidth: 110 },
+  ringOuter: {
+    width: 90, height: 90, borderRadius: 45,
+    borderWidth: 6, borderColor: '#13ec22',
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: '#f8fff9',
+    shadowColor: '#13ec22',
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  ringOuterOver: { borderColor: '#ef4444', shadowColor: '#ef4444' },
+  ringInner: { alignItems: 'center' },
+  ringMainValue: { fontSize: 20, fontWeight: '900', color: '#111811' },
+  ringMainLabel: { fontSize: 9, color: '#9ca3af', fontWeight: '700', letterSpacing: 1 },
+  ringProgressTrack: {
+    width: 90, height: 5, borderRadius: 3,
+    backgroundColor: '#e5e7eb', marginTop: 8, overflow: 'hidden',
+  },
+  ringProgressFill: { height: '100%', borderRadius: 3 },
+  ringProgressPercent: { fontSize: 11, color: '#6b7280', fontWeight: '700', marginTop: 4 },
+
+  // Makrolar
+  macroRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 20,
+  },
+
+  // Öğün bölümü
+  mealsSection: { marginBottom: 16 },
+  sectionHeader: {
+    flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', marginBottom: 12,
+  },
+  sectionTitle: { fontSize: 17, fontWeight: '800', color: '#0d1b0e' },
+  seeAllBtn: {
+    backgroundColor: '#e8fde9',
+    paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 20,
+  },
+  seeAllText: { fontSize: 12, color: '#15803d', fontWeight: '700' },
+
+  // Hızlı eylemler
+  quickActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 8,
+  },
+  quickBtn: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  quickBtnEmoji: { fontSize: 22, marginBottom: 4 },
+  quickBtnLabel: { fontSize: 12, fontWeight: '700' },
+
+  // Bottom bar
+  bottomBarWrapper: { position: 'absolute', bottom: 16, left: 12, right: 12 },
   bottomBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: '#ffffff',
-    borderRadius: 24,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    // Gölge
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
-    height: 70,
-  },
-  navItem: { alignItems: 'center', justifyContent: 'center', flex: 1 },
-  navIcon: { fontSize: 22, color: '#9ca3af', marginBottom: 2 },
-  navText: { fontSize: 10, fontWeight: '500', color: '#9ca3af' },
-  
-  // Aktif Item Stili
-  navItemActive: { alignItems: 'center', justifyContent: 'center', flex: 1 },
-  activeIconBg: {
-    backgroundColor: 'rgba(19, 236, 34, 0.1)',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  navIconActive: { fontSize: 20 },
-  navTextActive: { fontSize: 10, fontWeight: '700', color: '#13ec22' },
-
-  // Kamera Butonu
-  cameraContainer: { 
-    top: -25, 
-    justifyContent: 'center', 
-    alignItems: 'center',
-    zIndex: 10 
+    borderRadius: 32,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    height: 72,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+    elevation: 12,
+    borderWidth: 1,
+    borderColor: '#f0f0f0',
   },
   cameraButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#13ec22',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 4,
-    borderColor: '#f6f8f6', // Arka plan rengiyle aynı çerçeve
-    shadowColor: "#13ec22",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 8,
+    marginTop: -32,
   },
+  cameraButtonInner: {
+    width: 62, height: 62,
+    borderRadius: 31,
+    backgroundColor: '#13ec22',
+    justifyContent: 'center', alignItems: 'center',
+    borderWidth: 4, borderColor: '#f0f7f1',
+    shadowColor: '#13ec22',
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  cameraIcon: { fontSize: 26 },
+});
+
+const macroStyles = StyleSheet.create({
+  tile: {
+    flex: 1,
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#f0f0f0',
+  },
+  iconBox: {
+    width: 36, height: 36, borderRadius: 12,
+    justifyContent: 'center', alignItems: 'center',
+    marginBottom: 6,
+  },
+  emoji: { fontSize: 18 },
+  label: { fontSize: 11, color: '#9ca3af', fontWeight: '600', marginBottom: 2 },
+  value: { fontSize: 18, fontWeight: '900', color: '#111811' },
+  unit: { fontSize: 12, fontWeight: '600', color: '#9ca3af' },
+  track: {
+    width: '100%', height: 4, borderRadius: 2,
+    backgroundColor: '#f3f4f6', marginTop: 6, overflow: 'hidden',
+  },
+  fill: { height: '100%', borderRadius: 2 },
+  pct: { fontSize: 10, fontWeight: '700', marginTop: 3 },
+});
+
+const navStyles = StyleSheet.create({
+  item: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  activeBg: {
+    width: 42, height: 32, borderRadius: 16,
+    backgroundColor: 'rgba(19, 236, 34, 0.12)',
+    justifyContent: 'center', alignItems: 'center',
+    marginBottom: 2,
+  },
+  activeIcon: { fontSize: 18 },
+  icon: { fontSize: 20, marginBottom: 2 },
+  label: { fontSize: 9, fontWeight: '600', color: '#9ca3af' },
+  labelActive: { color: '#13ec22', fontWeight: '800' },
 });
 
 export default DashboardScreen;

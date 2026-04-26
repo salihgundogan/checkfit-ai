@@ -1,8 +1,12 @@
 import 'react-native-gesture-handler';
 import React, { useState, useEffect } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+// YENİ: createNavigationContainerRef eklendi
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+
+// YENİ: NetInfo eklendi
+import NetInfo from '@react-native-community/netinfo';
 
 // --- DOSYA YOLLARI (IMPORTLAR) ---
 import WellbeingSplash from './src/screens/SplashScreen';
@@ -17,36 +21,56 @@ import ProfileScreen from './src/screens/ProfileScreen';
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
 import ProgressScreen from './src/screens/ProgressScreen';
 import AICameraScreen from './src/screens/AICameraScreen';
-import ManualFoodScreen from './src/screens/ManualFoodScreen';
+import NoConnectionScreen from './src/screens/NoConnectionScreen';
+import ReportsScreen from './src/screens/ReportsScreen';
+import ManualEntryScreen from './src/screens/ManualEntryScreen';
+import AnalysisScreen from './src/screens/AnalysisScreen';
 
 const Stack = createStackNavigator();
+
+// YENİ: Navigation referansı (Uygulamanın her yerinden yönlendirme yapabilmek için)
+export const navigationRef = createNavigationContainerRef<any>();
 
 function App() {
   const [isShowSplash, setIsShowSplash] = useState(true);
 
+  // Splash Screen Zamanlayıcı
   useEffect(() => {
-    // 2.5 saniye sonra Splash ekranını kapat
     const timer = setTimeout(() => {
       setIsShowSplash(false);
-    }, 2500);
+    }, 6900);
 
     return () => clearTimeout(timer);
   }, []);
 
-  // 1. Durum: Splash süresi dolmadıysa Splash göster
+  // --- İNTERNET BAĞLANTISINI DİNLEME ---
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener(state => {
+      // Eğer bağlantı koptuysa ve splash ekranı geçildiyse
+      if (state.isConnected === false && !isShowSplash) {
+        if (navigationRef.isReady()) {
+          // İnternet yoksa hata ekranına yönlendir
+          navigationRef.navigate('NoConnection');
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isShowSplash]); // isShowSplash değiştiğinde tekrar tetiklenir
+
   if (isShowSplash) {
     return <WellbeingSplash />;
   }
 
-  // 2. Durum: Uygulama Başlıyor
   return (
     <SafeAreaProvider>
-      <NavigationContainer>
+      {/* YENİ: ref={navigationRef} eklendi */}
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator 
-          initialRouteName="Welcome" // BAŞLANGIÇ EKRANI ARTIK 'Welcome'
-          screenOptions={{
-            headerShown: false 
-          }}
+          initialRouteName="Welcome"
+          screenOptions={{ headerShown: false }}
         >
           {/* --- GİRİŞ AKIŞI --- */}
           <Stack.Screen name="Welcome" component={WelcomeScreen} />
@@ -64,7 +88,12 @@ function App() {
           <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
           <Stack.Screen name="Progress" component={ProgressScreen} />
           <Stack.Screen name="AICamera" component={AICameraScreen} />
-          <Stack.Screen name="ManualFood" component={ManualFoodScreen} />
+          <Stack.Screen name="NoConnection" component={NoConnectionScreen} />
+          <Stack.Screen name="Reports" component={ReportsScreen} />
+          <Stack.Screen  name="ManualEntry"  component={ManualEntryScreen}  options={{  headerShown: false, animation: 'slide_from_bottom' // Alttan açılarak gelmesi tasarımına yakışıyor
+ }} 
+  />
+  <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analiz' }} />
           
         </Stack.Navigator>
       </NavigationContainer>

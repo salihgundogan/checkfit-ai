@@ -1,59 +1,49 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import Icon from 'react-native-vector-icons/MaterialIcons';
 
-interface FoodItemProps {
-  name: string;
-  detail: string;
-  icon: string;
+interface Props {
+  item: any;
+  onAdd: (item: any) => void;
 }
 
-const FoodListItem = ({ name, detail, icon }: FoodItemProps) => {
-  return (
-    <View style={styles.container}>
-      <View style={styles.iconBox}>
-        <Text style={styles.icon}>{icon}</Text>
-      </View>
-      <View style={styles.info}>
-        <Text style={styles.name} numberOfLines={1}>{name}</Text>
-        <Text style={styles.detail} numberOfLines={1}>{detail}</Text>
-      </View>
-      <TouchableOpacity style={styles.addButton}>
-        <Text style={styles.addIcon}>+</Text>
-      </TouchableOpacity>
+const FoodListItem = ({ item, onAdd }: Props) => (
+  <View style={styles.card}>
+    <View style={styles.iconContainer}>
+      <Icon name={item.icon || 'restaurant'} size={24} color="#4A7C59" />
     </View>
-  );
-};
+    <View style={styles.infoContainer}>
+      <Text style={styles.name}>{item.name}</Text>
+      <Text style={styles.details}>{item.servingSize} - {item.calories} kcal</Text>
+    </View>
+    <TouchableOpacity style={styles.addButton} onPress={() => onAdd(item)}>
+      <Icon name="add" size={24} color="#4A7C59" />
+    </TouchableOpacity>
+  </View>
+);
 
 const styles = StyleSheet.create({
-  container: {
+  card: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: '#FFF',
     padding: 12,
     borderRadius: 16,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: 'rgba(0,0,0,0.05)',
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 2,
-    elevation: 1,
   },
-  iconBox: {
+  iconContainer: {
     width: 56,
     height: 56,
     borderRadius: 12,
-    backgroundColor: '#e7f3e8', // Light green
+    backgroundColor: '#e7f3e8',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
   },
-  icon: { fontSize: 24 },
-  info: { flex: 1, marginRight: 12 },
-  name: { fontSize: 16, fontWeight: '600', color: '#0d1b0e', marginBottom: 2 },
-  detail: { fontSize: 14, color: '#4c9a51', fontWeight: '500' },
-  
+  infoContainer: { flex: 1, marginLeft: 12 },
+  name: { fontSize: 16, fontWeight: '600', color: '#0d1b0e' },
+  details: { fontSize: 13, color: '#4c9a51', marginTop: 2 },
   addButton: {
     width: 40,
     height: 40,
@@ -62,7 +52,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  addIcon: { fontSize: 24, color: '#13ec22', fontWeight: 'bold' },
 });
 
 export default FoodListItem;
