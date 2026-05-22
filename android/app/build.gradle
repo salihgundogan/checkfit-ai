@@ -25,6 +25,11 @@ android {
         // ── Google OAuth için ──────────────────────────
         manifestPlaceholders = [appAuthRedirectScheme: "com.fhealth"]
     }
+
+      aaptOptions {
+        noCompress "onnx"
+    }
+    
     signingConfigs {
         debug {
             storeFile file('debug.keystore')

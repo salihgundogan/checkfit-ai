@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ActivityIndicator, TouchableOpacity,
   SafeAreaView, Alert, Dimensions, Platform, StatusBar, ImageBackground,
-  Modal, TextInput, ScrollView, KeyboardAvoidingView
+  Modal, TextInput, ScrollView, PanResponder, Animated,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { InferenceSession } from 'onnxruntime-react-native';
@@ -11,195 +11,196 @@ import RNFS from 'react-native-fs';
 import { decode } from 'base64-arraybuffer';
 import { runFoodInference } from '../utils/modelHelper';
 import { supabase } from '../lib/supabase';
+import { useTheme } from './ThemeContext';
+const { height, width } = Dimensions.get('window');
 
-const { height } = Dimensions.get('window');
-
-// ─── Edamam (Model sütunu) ───────────────────────────────────
-const EDAMAM_APP_ID  = '286a7048';
-const EDAMAM_APP_KEY = '55831be4f127c715af66a276de5d837f';
-
+// ─── Tipler ──────────────────────────────────────────────────
 type Nutrition = { calories: number; protein: number; fat: number; carbs: number };
-type SearchResult = Nutrition & { id: string; label: string };
 
-async function searchEdamam(query: string): Promise<SearchResult[]> {
+// ─── Supabase veri çekme fonksiyonları ───────────────────────
+
+/**
+ * FoodCoefficients tablosundan AWR katsayısını çeker.
+ * Tablo: { food_id: string, awr_coefficient: number }
+ */
+async function fetchAWR(foodId: string): Promise<number | null> {
   try {
-    const url =
-      `https://api.edamam.com/api/food-database/v2/parser` +
-      `?app_id=${EDAMAM_APP_ID}&app_key=${EDAMAM_APP_KEY}` +
-      `&ingr=${encodeURIComponent(query)}&nutrition-type=cooking`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    return (data?.hints || []).slice(0, 6).map((h: any) => ({
-      id:       h.food.foodId,
-      label:    h.food.label,
-      calories: Math.round(h.food.nutrients?.ENERC_KCAL || 0),
-      protein:  Math.round((h.food.nutrients?.PROCNT || 0) * 10) / 10,
-      fat:      Math.round((h.food.nutrients?.FAT    || 0) * 10) / 10,
-      carbs:    Math.round((h.food.nutrients?.CHOCDF || 0) * 10) / 10,
-    }));
-  } catch { return []; }
+    const { data, error } = await supabase
+      .from('FoodCoefficients')
+      .select('awr_coefficient')
+      .eq('food_id', foodId)
+      .single();
+    if (error || !data) return null;
+    return data.awr_coefficient as number;
+  } catch {
+    return null;
+  }
 }
 
-// ─── OpenFoodFacts (İnternet sütunu) ────────────────────────
-async function searchOpenFoodFacts(query: string): Promise<Nutrition | null> {
+/**
+ * LocalFoods tablosundan 100g başına USDA besin değerlerini çeker.
+ * Tablo: { food_id, calories_per_100g, protein_per_100g, carbs_per_100g, fat_per_100g }
+ */
+async function fetchUSDA(foodId: string): Promise<Nutrition | null> {
   try {
-    const url =
-      `https://world.openfoodfacts.org/cgi/search.pl` +
-      `?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=5`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    const products = (data?.products || []).filter(
-      (p: any) => p.nutriments && p.nutriments['energy-kcal_100g']
-    );
-    if (products.length === 0) return null;
-    const p = products[0].nutriments;
+    const { data, error } = await supabase
+      .from('LocalFoods')
+      .select('calories_per_100g, protein_per_100g, carbs_per_100g, fat_per_100g')
+      .eq('food_id', foodId)
+      .single();
+    if (error || !data) return null;
     return {
-      calories: Math.round(p['energy-kcal_100g']        || 0),
-      protein:  Math.round((p['proteins_100g']          || 0) * 10) / 10,
-      fat:      Math.round((p['fat_100g']               || 0) * 10) / 10,
-      carbs:    Math.round((p['carbohydrates_100g']     || 0) * 10) / 10,
+      calories: data.calories_per_100g,
+      protein:  data.protein_per_100g,
+      fat:      data.fat_per_100g ?? 0,
+      carbs:    data.carbs_per_100g,
     };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-// Edamam ile de bul (düzenleme modalı araması için)
-async function searchFood(query: string): Promise<SearchResult[]> {
-  return searchEdamam(query);
+/**
+ * Gramaj + 100g başına besin → porsiyona göre hesaplanmış besin değerleri
+ */
+function calcNutrition(per100g: Nutrition, grams: number): Nutrition {
+  const r = grams / 100;
+  return {
+    calories: Math.round(per100g.calories * r),
+    protein:  Math.round(per100g.protein  * r * 10) / 10,
+    fat:      Math.round(per100g.fat      * r * 10) / 10,
+    carbs:    Math.round(per100g.carbs    * r * 10) / 10,
+  };
 }
 
-// ─── Makro karşılaştırma satırı ─────────────────────────────
-const CompareRow = ({
-  label, modelVal, internetVal, unit = 'g', highlight,
-}: {
-  label: string; modelVal: number; internetVal: number; unit?: string; highlight?: boolean;
-}) => (
-  <View style={[cmpStyles.row, highlight && cmpStyles.rowHighlight]}>
-    <Text style={cmpStyles.label}>{label}</Text>
-    <View style={cmpStyles.valBox}>
-      <Text style={cmpStyles.modelVal}>{modelVal}{unit}</Text>
-    </View>
-    <Icon name="compare-arrows" size={16} color="#94a3b8" style={{ marginHorizontal: 4 }} />
-    <View style={cmpStyles.valBox}>
-      <Text style={cmpStyles.netVal}>{internetVal}{unit}</Text>
-    </View>
-  </View>
-);
-
-const cmpStyles = StyleSheet.create({
-  row:          { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, paddingHorizontal: 4 },
-  rowHighlight: { backgroundColor: '#f0fdf4', borderRadius: 10 },
-  label:        { flex: 1, fontSize: 13, fontWeight: '600', color: '#64748b' },
-  valBox:       { width: 70, alignItems: 'center' },
-  modelVal:     { fontSize: 14, fontWeight: '700', color: '#6366f1' },
-  netVal:       { fontSize: 14, fontWeight: '700', color: '#4A7C59' },
-});
-// ────────────────────────────────────────────────────────────
-
+// ─── Bileşen ─────────────────────────────────────────────────
 const AnalysisScreen: React.FC<NativeStackScreenProps<any, 'Analysis'>> = ({ route, navigation }) => {
-  const { imageUri } = route.params;
+   const { T, darkMode } = useTheme();
+  const { imageUri } = route.params as { imageUri: string };
 
-  const [session,        setSession]        = useState<InferenceSession | null>(null);
-  const [loading,        setLoading]        = useState(true);
-  const [saving,         setSaving]         = useState(false);
+  const [session,   setSession]   = useState<InferenceSession | null>(null);
+  const [loading,   setLoading]   = useState(true);
+  const [saving,    setSaving]    = useState(false);
 
-  // Model tahmini yemek adı (ONNX çıktısı) — değişmez
-  const [modelName,      setModelName]      = useState<string | null>(null);
+  // Model çıktıları
+  const [foodName,      setFoodName]      = useState<string | null>(null);
+  const [areaCm2,       setAreaCm2]       = useState<number>(0);
+  const [confidence,    setConfidence]    = useState<number>(0);   // 0–100
 
-  // 🤖 Model sütunu: Edamam'dan gelen değerler
-  const [modelNutrition, setModelNutrition] = useState<Nutrition>({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-
-  // 🌐 İnternet sütunu: OpenFoodFacts'ten gelen değerler
-  const [internetNutrition, setInternetNutrition] = useState<Nutrition>({ calories: 0, protein: 0, fat: 0, carbs: 0 });
-  const [internetLoaded, setInternetLoaded] = useState(false);
-
-  // Kullanıcının görmek / kaydetmek istediği yemek adı
-  const [foodName,       setFoodName]       = useState<string | null>(null);
+  // Hesaplanan değerler
+  const [estimatedGrams, setEstimatedGrams] = useState<number>(0);
+  const [per100g,        setPer100g]        = useState<Nutrition>({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+  const [nutrition,      setNutrition]      = useState<Nutrition>({ calories: 0, protein: 0, fat: 0, carbs: 0 });
 
   // Düzenleme modal
-  const [editVisible,    setEditVisible]    = useState(false);
-  const [searchQuery,    setSearchQuery]    = useState('');
-  const [searchResults,  setSearchResults]  = useState<SearchResult[]>([]);
-  const [searching,      setSearching]      = useState(false);
-  const [editName,       setEditName]       = useState('');
-  const [editCal,        setEditCal]        = useState('');
-  const [editProtein,    setEditProtein]    = useState('');
-  const [editFat,        setEditFat]        = useState('');
-  const [editCarbs,      setEditCarbs]      = useState('');
+  const [editVisible,  setEditVisible]  = useState(false);
+  const [editFoodName, setEditFoodName] = useState('');
+  const [portionGrams, setPortionGrams] = useState(200);
 
-  // Özel düzenleme değerleri (custom source)
-  const [customNutrition, setCustomNutrition] = useState<Nutrition>({ calories: 0, protein: 0, fat: 0, carbs: 0 });
+  // Slider
+  const sliderAnim  = useRef(new Animated.Value(0.5)).current;
+  const sliderWidth = width - 40 - 96;
+  const MIN_GRAMS   = 50;
+  const MAX_GRAMS   = 600;
 
-  // Hangi kaynak seçili: 'model' | 'internet' | 'custom'
-  const [selectedSource, setSelectedSource] = useState<'model' | 'internet' | 'custom'>('internet');
+  const gramsToSlider = (g: number) => (g - MIN_GRAMS) / (MAX_GRAMS - MIN_GRAMS);
+  const sliderToGrams = (v: number) => Math.round(MIN_GRAMS + v * (MAX_GRAMS - MIN_GRAMS));
 
-  const searchTimeout = useRef<any>(null);
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder:  () => true,
+      onPanResponderMove: (_, gs) => {
+        const val = Math.max(0, Math.min(1, (gs.moveX - 48) / sliderWidth));
+        sliderAnim.setValue(val);
+        setPortionGrams(sliderToGrams(val));
+      },
+    })
+  ).current;
 
-  // 1. ONNX modeli yükle
-  useEffect(() => {
-    (async () => {
-      try {
-        const modelFileName = 'food_model.onnx';
-        const destPath = `${RNFS.DocumentDirectoryPath}/${modelFileName}`;
-        if (!(await RNFS.exists(destPath))) await RNFS.copyFileAssets(modelFileName, destPath);
-        const sess = await InferenceSession.create(`file://${destPath}`);
-        setSession(sess);
-      } catch (e) {
-        console.error('Model yükleme hatası:', e);
-        setLoading(false);
+
+
+  // ── 1. ONNX Modeli Yükle ──────────────────────────────────
+useEffect(() => {
+  (async () => {
+    try {
+      const modelFileName = 'mainmodel_v2.onnx';
+      const destPath = `${RNFS.DocumentDirectoryPath}/${modelFileName}`;
+      
+      // Debug: assets'te var mı kontrol et
+      const assetFiles = await RNFS.readDirAssets('');
+      console.log('Assets klasörü:', assetFiles.map(f => f.name));
+      
+      const exists = await RNFS.exists(destPath);
+      console.log('Model zaten kopyalanmış mı:', exists, destPath);
+      
+      if (!exists) {
+        console.log('Model kopyalanıyor...');
+        await RNFS.copyFileAssets(modelFileName, destPath);
+        console.log('Kopyalama başarılı');
       }
-    })();
-  }, []);
+      
+      console.log('Session oluşturuluyor...');
+      const sess = await InferenceSession.create(destPath);
+      console.log('Session başarılı:', sess.inputNames, sess.outputNames);
+      setSession(sess);
+    } catch (e: any) {
+      // Hatanın tam detayını görmek için
+      console.error('Model yükleme hatası DETAY:', JSON.stringify(e), e?.message, e?.stack);
+      setLoading(false);
+    }
+  })();
+}, []);
 
-  // 2. ONNX → yemek adı → Edamam + OpenFoodFacts (paralel)
+  // ── 2. Çıkarım → Supabase → Hesaplama ────────────────────
   useEffect(() => {
-    if (!session || !imageUri || modelName) return;
+    if (!session || !imageUri || foodName) return;
     (async () => {
       try {
-        const tahmin = await runFoodInference(imageUri, session);
-        const temiz  = tahmin
-          ? tahmin.replace(/SONUÇ:\s*/i, '').split(' ')[0].split('\n')[0].trim()
-          : 'Belirlenemedi';
+        // runFoodInference artık { name, areaCm2, confidence } döndürmeli
+        // modelHelper.ts'de buna göre güncelleme yapılmalı.
+        const result = await runFoodInference(imageUri, session) as {
+          name:       string;
+          areaCm2:    number;
+          confidence: number; // 0–1 arası float
+        };
+        console.log('=== MODEL ÇIKTISI ===');
+console.log('Ham result:', JSON.stringify(result));
+console.log('Name:', result.name);
+console.log('Confidence:', result.confidence);
+console.log('AreaCm2:', result.areaCm2);
+        const cleanName   = result.name || 'Belirlenemedi';
+        const area        = result.areaCm2    ?? 0;
+        const conf        = result.confidence ?? 0;
 
-        setModelName(temiz);
-        setFoodName(temiz);
+        setFoodName(cleanName);
+        setAreaCm2(area);
+        setConfidence(Math.round(conf * 100)); // 0–100'e çevir
+        setEditFoodName(cleanName);
 
-        if (temiz !== 'Belirlenemedi') {
-          // İki API'yi paralel çağır
-          const [edamamResults, offResult] = await Promise.all([
-            searchEdamam(temiz),
-            searchOpenFoodFacts(temiz),
+        if (cleanName !== 'Belirlenemedi') {
+          // Supabase'den AWR ve USDA verilerini paralel çek
+          const [awr, usda] = await Promise.all([
+            fetchAWR(cleanName),
+            fetchUSDA(cleanName),
           ]);
 
-          // 🤖 Model sütunu ← Edamam ilk sonuç
-          if (edamamResults.length > 0) {
-            const e = edamamResults[0];
-            setModelNutrition({
-              calories: e.calories,
-              protein:  e.protein,
-              fat:      e.fat,
-              carbs:    e.carbs,
-            });
-          } else {
-            // Edamam sonuç vermezse fallback
-            setModelNutrition({ calories: 250, protein: 10, fat: 8, carbs: 30 });
-          }
+          // Gramaj hesapla
+          const grams = awr && area > 0
+  ? Math.round(area * awr)
+  : 150; // ✅ area=0 ise 150g fallback devreye girer // fallback: 150g
 
-          // 🌐 İnternet sütunu ← OpenFoodFacts
-          if (offResult) {
-            setInternetNutrition(offResult);
-          } else {
-            // OFF sonuç vermezse Edamam'ın 2. sonucunu dene, yoksa fallback
-            const fallback = edamamResults[1] ?? edamamResults[0];
-            setInternetNutrition(fallback
-              ? { calories: fallback.calories, protein: fallback.protein, fat: fallback.fat, carbs: fallback.carbs }
-              : { calories: 250, protein: 10, fat: 8, carbs: 30 }
-            );
-          }
+          // 100g başına besin değeri
+          const base: Nutrition = usda ?? { calories: 250, protein: 10, fat: 8, carbs: 30 };
 
-          setInternetLoaded(true);
+          setPer100g(base);
+          setEstimatedGrams(grams);
+          setPortionGrams(grams);
+          sliderAnim.setValue(gramsToSlider(Math.min(MAX_GRAMS, Math.max(MIN_GRAMS, grams))));
+          setNutrition(calcNutrition(base, grams));
         }
-      } catch {
-        setModelName('Hata');
+      } catch (e) {
+        console.error('Analiz hatası:', e);
         setFoodName('Hata');
       } finally {
         setLoading(false);
@@ -207,63 +208,31 @@ const AnalysisScreen: React.FC<NativeStackScreenProps<any, 'Analysis'>> = ({ rou
     })();
   }, [session, imageUri]);
 
-  // Seçilen kaynağa göre aktif besin değeri
-  const activeNutrition: Nutrition =
-    selectedSource === 'model'    ? modelNutrition    :
-    selectedSource === 'internet' ? internetNutrition :
-    customNutrition; // custom
+  // Porsiyon değişince besin güncelle
+  useEffect(() => {
+    if (per100g.calories > 0) {
+      setNutrition(calcNutrition(per100g, portionGrams));
+    }
+  }, [portionGrams, per100g]);
 
-  // Düzenle modalı aç
+  // ── Modal işlemleri ──────────────────────────────────────
   const openEdit = () => {
-    // Modal alanlarını şu an seçili kaynakla doldur
-    const current = activeNutrition;
-    setEditName(foodName || '');
-    setEditCal(String(current.calories));
-    setEditProtein(String(current.protein));
-    setEditFat(String(current.fat));
-    setEditCarbs(String(current.carbs));
-    setSearchQuery('');
-    setSearchResults([]);
+    setEditFoodName(foodName || '');
     setEditVisible(true);
   };
 
-  // Arama (debounced)
-  const handleSearch = (text: string) => {
-    setSearchQuery(text);
-    if (searchTimeout.current) clearTimeout(searchTimeout.current);
-    if (text.length < 2) { setSearchResults([]); return; }
-    searchTimeout.current = setTimeout(async () => {
-      setSearching(true);
-      const results = await searchFood(text);
-      setSearchResults(results);
-      setSearching(false);
-    }, 500);
-  };
-
-  const selectResult = (item: SearchResult) => {
-    setEditName(item.label);
-    setEditCal(String(item.calories));
-    setEditProtein(String(item.protein));
-    setEditFat(String(item.fat));
-    setEditCarbs(String(item.carbs));
-    setSearchResults([]);
-    setSearchQuery(item.label);
+  const adjustPortion = (delta: number) => {
+    const next = Math.max(MIN_GRAMS, Math.min(MAX_GRAMS, portionGrams + delta));
+    setPortionGrams(next);
+    sliderAnim.setValue(gramsToSlider(next));
   };
 
   const applyEdit = () => {
-    const custom: Nutrition = {
-      calories: parseFloat(editCal)     || 0,
-      protein:  parseFloat(editProtein) || 0,
-      fat:      parseFloat(editFat)     || 0,
-      carbs:    parseFloat(editCarbs)   || 0,
-    };
-    setFoodName(editName);
-    setCustomNutrition(custom);
-    setSelectedSource('custom');
+    setFoodName(editFoodName);
     setEditVisible(false);
   };
 
-  // Supabase kaydet
+  // ── Supabase Kaydet ───────────────────────────────────────
   const handleSave = async () => {
     if (!foodName || foodName === 'Hata' || foodName === 'Belirlenemedi') return;
     try {
@@ -273,21 +242,26 @@ const AnalysisScreen: React.FC<NativeStackScreenProps<any, 'Analysis'>> = ({ rou
 
       const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.jpg`;
       const fileData = await RNFS.readFile(imageUri, 'base64');
+
       const { error: upErr } = await supabase.storage
         .from('meal-photos')
         .upload(fileName, decode(fileData), { contentType: 'image/jpeg', upsert: true });
       if (upErr) throw upErr;
 
       const { data: { publicUrl } } = supabase.storage.from('meal-photos').getPublicUrl(fileName);
+
       const { error: dbErr } = await supabase.from('meals').insert([{
-        user_id:  user.id,
-        name:     foodName,
-        image_url: publicUrl,
-        calories: activeNutrition.calories,
-        protein:  activeNutrition.protein,
-        fat:      activeNutrition.fat,
-        carbs:    activeNutrition.carbs,
-        ingredients: [],
+        user_id:        user.id,
+        name:           foodName,
+        image_url:      publicUrl,
+        calories:       nutrition.calories,
+        protein:        nutrition.protein,
+        fat:            nutrition.fat,
+        carbs:          nutrition.carbs,
+        portion_grams:  portionGrams,
+        area_cm2:       areaCm2,
+        confidence:     confidence,
+        ingredients:    [],
       }]);
       if (dbErr) throw dbErr;
 
@@ -300,302 +274,534 @@ const AnalysisScreen: React.FC<NativeStackScreenProps<any, 'Analysis'>> = ({ rou
     }
   };
 
+  const portionCalories = Math.round(per100g.calories * portionGrams / 100);
+
+  // ── Güven rengi ──────────────────────────────────────────
+  const confidenceColor =
+    confidence >= 85 ? '#4A7C59' :
+    confidence >= 65 ? '#f59e0b' : '#ef4444';
+
+  const confidenceLabel =
+    confidence >= 85 ? 'Yüksek Eşleşme' :
+    confidence >= 65 ? 'Orta Eşleşme'  : 'Düşük Eşleşme';
+
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="dark-content" transparent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-      <SafeAreaView style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
-          <Icon name="arrow-back-ios" size={22} color="#1e293b" />
-        </TouchableOpacity>
-        <Text style={styles.title}>Öğününü Tanı</Text>
-        <View style={{ width: 40 }} />
-      </SafeAreaView>
+      {/* ── FOTOĞRAF ALANI ── */}
+      <ImageBackground
+        source={{ uri: imageUri }}
+        style={styles.heroImage}
+        imageStyle={{ resizeMode: 'cover' }}
+      >
+        <View style={styles.heroOverlay} />
 
-      <View style={styles.imgArea}>
-        <ImageBackground source={{ uri: imageUri }} style={styles.bgImg} imageStyle={{ borderRadius: 32 }}>
-          <View style={styles.overlay}>
-            <View style={styles.cornersRow}>
-              <View style={[styles.corner, { borderTopWidth: 4, borderLeftWidth: 4 }]} />
-              <View style={[styles.corner, { borderTopWidth: 4, borderRightWidth: 4 }]} />
+        <SafeAreaView style={styles.header}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
+            <Icon name="arrow-back-ios" size={22} color="#fff" />
+          </TouchableOpacity>
+          <View style={{ width: 40 }} />
+        </SafeAreaView>
+
+        {/* Viewfinder köşeleri */}
+        <View style={styles.viewfinderContainer}>
+          <View style={styles.viewfinderRow}>
+            <View style={[styles.corner, { borderTopWidth: 3, borderLeftWidth: 3 }]} />
+            <View style={[styles.corner, { borderTopWidth: 3, borderRightWidth: 3 }]} />
+          </View>
+
+       {/* Viewfinder orta badge — model sonucuna göre */}
+<View style={styles.scanBadge}>
+  <View style={styles.scanBadgePulse} />
+  <View style={styles.scanBadgeInner}>
+    <Icon name="videocam" size={16} color="#fff" />
+    <Text style={styles.scanText}>
+      {loading
+        ? 'ANALİZ EDİLİYOR...'
+        : foodName && foodName !== 'Belirlenemedi' && foodName !== 'Hata'
+          ? 'YEMEK ALGILANDI'
+          : 'YEMEK ALGILANAMADI'}
+    </Text>
+  </View>
+</View>
+
+          <View style={styles.viewfinderRow}>
+            <View style={[styles.corner, { borderBottomWidth: 3, borderLeftWidth: 3 }]} />
+            <View style={[styles.corner, { borderBottomWidth: 3, borderRightWidth: 3 }]} />
+          </View>
+        </View>
+
+        {/* Güven skoru badge — model'den gerçek değer */}
+        {!loading && confidence > 0 && (
+          <View style={[styles.confidenceBadge, { borderColor: confidenceColor + '55' }]}>
+            <Icon name="auto-awesome" size={14} color={confidenceColor} />
+            <Text style={[styles.confidenceText, { color: '#fff' }]}>
+              YZ Analizi  •  %{confidence} {confidenceLabel}
+            </Text>
+          </View>
+        )}
+
+        {/* Alan bilgisi badge */}
+        {!loading && areaCm2 > 0 && (
+          <View style={styles.areaBadge}>
+            <Icon name="crop-free" size={13} color="#94a3b8" />
+            <Text style={styles.areaText}>{areaCm2.toFixed(1)} cm²</Text>
+          </View>
+        )}
+      </ImageBackground>
+
+      {/* ── ALT SHEET ── */}
+      <View style={[styles.sheet, { backgroundColor: T.card }]}>
+        <View style={[styles.handle, { backgroundColor: darkMode ? '#3a3a3c' : '#e2e8f0' }]} />
+
+        <View style={styles.sheetContent}>
+
+          {/* Yemek adı + kalori */}
+          <View style={styles.resultRow}>
+            <View style={{ flex: 1 }}>
+              <View style={styles.aiBadge}>
+                <Icon name="auto-awesome" size={12} color="#4A7C59" />
+                <Text style={styles.aiText}>YAPAY ZEKA ANALİZİ</Text>
+              </View>
+              <Text style={[styles.foodName, { color: T.text }]}>
+                {loading ? 'Analiz ediliyor...' : (foodName ?? 'Belirlenemedi')}
+              </Text>
+              {!loading && estimatedGrams > 0 && (
+               <Text style={[styles.mealMeta, { color: T.muted }]}>
+                  Tahmini Porsiyon: {estimatedGrams}g
+                </Text>
+              )}
             </View>
-            <View style={styles.tag}>
-              <Icon name="videocam" size={16} color="#fff" />
-              <Text style={styles.tagText}>YEMEK ALGILANDI</Text>
-            </View>
-            <View style={styles.cornersRow}>
-              <View style={[styles.corner, { borderBottomWidth: 4, borderLeftWidth: 4 }]} />
-              <View style={[styles.corner, { borderBottomWidth: 4, borderRightWidth: 4 }]} />
+            <View style={styles.kcalBox}>
+              {loading
+                ? <ActivityIndicator color="#4A7C59" />
+                : <>
+                    <Text style={styles.kcalVal}>{nutrition.calories}</Text>
+                    <Text style={styles.kcalUnit}>kcal</Text>
+                  </>
+              }
             </View>
           </View>
-        </ImageBackground>
-      </View>
 
-      <View style={styles.sheet}>
-        <View style={styles.handle} />
-        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-          <View style={styles.sheetContent}>
-
-            {/* Yemek adı + kalori */}
-            <View style={styles.resultRow}>
-              <View style={{ flex: 1 }}>
-                <View style={styles.aiBadge}>
-                  <Icon name="auto-awesome" size={14} color="#4A7C59" />
-                  <Text style={styles.aiText}>YAPAY ZEKA ANALİZİ</Text>
-                </View>
-                <Text style={styles.foodName}>
-                  {loading ? 'Analiz ediliyor...' : (foodName ?? 'Belirlenemedi')}
-                </Text>
+          {/* Makrolar */}
+          {!loading && (
+            <View style={styles.macros}>
+              <View style={[styles.mBox, { backgroundColor: T.surface, borderColor: T.border }]}>
+                <Text style={[styles.mLabel, { color: T.muted }]}>Protein</Text>
+                <Text style={[styles.mVal, { color: T.text }]}>{nutrition.protein}g</Text>
               </View>
-              <View style={styles.kcalBox}>
-                <Text style={styles.kcalVal}>{loading ? '...' : activeNutrition.calories}</Text>
-                <Text style={styles.kcalUnit}>kcal</Text>
+              <View style={styles.mBox}>
+                <Text style={[styles.mLabel,{ color: T.muted }]}>K.hidrat</Text>
+                <Text style={styles.mVal}>{nutrition.carbs}g</Text>
+              </View>
+              <View style={styles.mBox}>
+                <Text style={styles.mLabel}>Yağ</Text>
+                <Text style={styles.mVal}>{nutrition.fat}g</Text>
               </View>
             </View>
+          )}
 
-            {loading ? (
-              <ActivityIndicator size="large" color="#4A7C59" style={{ marginVertical: 20 }} />
-            ) : (
-              <>
-                {/* ── Karşılaştırma tablosu ── */}
-                <View style={styles.compareCard}>
-                  {/* Başlık satırı */}
-                  <View style={[cmpStyles.row, { marginBottom: 4 }]}>
-                    <Text style={[cmpStyles.label, { color: '#1e293b', fontWeight: '800' }]}>Değer</Text>
-                    <View style={cmpStyles.valBox}>
-                      <Text style={{ fontSize: 11, fontWeight: '800', color: '#6366f1' }}>🤖 Edamam</Text>
-                    </View>
-                    <View style={{ width: 24 }} />
-                    <View style={cmpStyles.valBox}>
-                      <Text style={{ fontSize: 11, fontWeight: '800', color: '#4A7C59' }}>🌐 OpenFood</Text>
-                    </View>
-                  </View>
+          {loading && (
+            <ActivityIndicator size="large" color="#4A7C59" style={{ marginVertical: 24 }} />
+          )}
 
-                  <View style={styles.divider} />
-
-                  <CompareRow label="Kalori"       unit=" kcal" modelVal={modelNutrition.calories}  internetVal={internetNutrition.calories} highlight />
-                  <CompareRow label="Protein"                   modelVal={modelNutrition.protein}   internetVal={internetNutrition.protein} />
-                  <CompareRow label="Karbonhidrat"              modelVal={modelNutrition.carbs}     internetVal={internetNutrition.carbs}   highlight />
-                  <CompareRow label="Yağ"                       modelVal={modelNutrition.fat}       internetVal={internetNutrition.fat} />
-
-                  <View style={styles.divider} />
-
-                  {/* Kaynak seçimi */}
-                  <Text style={styles.sourceTitle}>Hangi değeri kaydet?</Text>
-                  <View style={styles.sourceRow}>
-                    <TouchableOpacity
-                      style={[styles.sourceBtn, selectedSource === 'model' && styles.sourceBtnActivePurple]}
-                      onPress={() => setSelectedSource('model')}
-                    >
-                      <Text style={[styles.sourceBtnText, selectedSource === 'model' && { color: '#6366f1' }]}>
-                        🤖 Edamam
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.sourceBtn, selectedSource === 'internet' && styles.sourceBtnActiveGreen]}
-                      onPress={() => setSelectedSource('internet')}
-                    >
-                      <Text style={[styles.sourceBtnText, selectedSource === 'internet' && { color: '#4A7C59' }]}>
-                        🌐 OpenFood
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.sourceBtn, selectedSource === 'custom' && styles.sourceBtnActiveOrange]}
-                      onPress={openEdit}
-                    >
-                      <Text style={[styles.sourceBtnText, selectedSource === 'custom' && { color: '#f59e0b' }]}>
-                        ✏️ Özel
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                {/* Seçilen kaynağın makroları */}
-                <View style={styles.macros}>
-                  <View style={styles.mBox}>
-                    <Text style={styles.mLabel}>Protein</Text>
-                    <Text style={styles.mVal}>{activeNutrition.protein}g</Text>
-                  </View>
-                  <View style={styles.mBox}>
-                    <Text style={styles.mLabel}>K.hidrat</Text>
-                    <Text style={styles.mVal}>{activeNutrition.carbs}g</Text>
-                  </View>
-                  <View style={styles.mBox}>
-                    <Text style={styles.mLabel}>Yağ</Text>
-                    <Text style={styles.mVal}>{activeNutrition.fat}g</Text>
-                  </View>
-                </View>
-              </>
-            )}
-
-            {/* Butonlar */}
-            <View style={styles.btns}>
-              <TouchableOpacity style={styles.editBtn} onPress={openEdit} disabled={loading}>
-                <Icon name="edit" size={20} color="#64748b" />
-                <Text style={styles.btnEditText}>Düzenle</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.saveBtn, (loading || saving) && { opacity: 0.7 }]}
-                onPress={handleSave} disabled={loading || saving}
-              >
-                {saving ? <ActivityIndicator color="#0d1b0e" /> : (
-                  <>
-                    <Icon name="check" size={24} color="#0d1b0e" />
+          {/* Butonlar */}
+          <View style={styles.btns}>
+            <TouchableOpacity style={[styles.editBtn, { backgroundColor: T.card, borderColor: T.border }]} onPress={openEdit} disabled={loading}>
+              <Icon name="edit" size={18} color="#64748b" />
+              <Text style={[styles.btnEditText, { color: T.muted }]}>Düzenle</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.saveBtn, (loading || saving) && { opacity: 0.6 }]}
+              onPress={handleSave}
+              disabled={loading || saving}
+            >
+              {saving
+                ? <ActivityIndicator color="#0d1b0e" />
+                : <>
+                    <Icon name="check" size={22} color="#0d1b0e" />
                     <Text style={styles.saveText}>Onayla</Text>
                   </>
-                )}
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ height: 20 }} />
+              }
+            </TouchableOpacity>
           </View>
-        </ScrollView>
+        </View>
       </View>
 
-      {/* ─── DÜZENLEME MODALI ─── */}
-      <Modal visible={editVisible} animationType="slide" transparent onRequestClose={() => setEditVisible(false)}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Yemeği Düzenle</Text>
-              <TouchableOpacity onPress={() => setEditVisible(false)}>
-                <Icon name="close" size={24} color="#64748b" />
+      {/* ── DÜZENLEME MODALI ── */}
+      <Modal
+        visible={editVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setEditVisible(false)}
+      >
+        <View style={modal.overlay}>
+          <View style={modal.sheet}>
+            <View style={modal.handle} />
+
+            <View style={modal.header}>
+              <TouchableOpacity onPress={() => setEditVisible(false)} style={modal.backBtn}>
+                <Icon name="arrow-back" size={22} color="#141b0d" />
               </TouchableOpacity>
+              <Text style={modal.title}>Analizi Düzenle</Text>
+              <View style={{ width: 40 }} />
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.sectionLabel}>🌐 İnternette Ara</Text>
-              <View style={styles.searchBox}>
-                <Icon name="search" size={20} color="#94a3b8" />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Yemek adı yaz... (örn: pizza)"
-                  placeholderTextColor="#94a3b8"
-                  value={searchQuery}
-                  onChangeText={handleSearch}
-                />
-                {searching && <ActivityIndicator size="small" color="#4A7C59" />}
+            <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+              {/* Fotoğraf önizleme */}
+              <View style={modal.imgContainer}>
+                <ImageBackground
+                  source={{ uri: imageUri }}
+                  style={modal.img}
+                  imageStyle={{ borderRadius: 16, resizeMode: 'cover' }}
+                >
+                  <View style={modal.imgOverlay} />
+                  <View style={modal.imgBadge}>
+                    <Icon name="auto-awesome" size={13} color="#4A7C59" />
+                    <Text style={modal.imgBadgeText}>
+                      YZ Güveni: %{confidence}
+                    </Text>
+                  </View>
+                </ImageBackground>
               </View>
 
-              {searchResults.length > 0 && (
-                <View style={styles.resultsBox}>
-                  {searchResults.map(item => (
-                    <TouchableOpacity key={item.id} style={styles.resultItem} onPress={() => selectResult(item)}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.resultLabel}>{item.label}</Text>
-                        <Text style={styles.resultMacros}>
-                          {item.calories} kcal • P:{item.protein}g • K:{item.carbs}g • Y:{item.fat}g
-                        </Text>
-                      </View>
-                      <Icon name="add-circle-outline" size={22} color="#4A7C59" />
-                    </TouchableOpacity>
-                  ))}
+              {/* Yemek adı */}
+              <View style={modal.nameInputWrap}>
+                <TextInput
+                  style={modal.nameInput}
+                  value={editFoodName}
+                  onChangeText={setEditFoodName}
+                  placeholder="Yemek adı"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Icon name="edit" size={20} color="#4A7C59" style={modal.nameInputIcon} />
+              </View>
+
+              {/* Alan & AWR bilgisi */}
+              {areaCm2 > 0 && (
+                <View style={modal.infoRow}>
+                  <View style={modal.infoChip}>
+                    <Icon name="crop-free" size={14} color="#4A7C59" />
+                    <Text style={modal.infoChipText}>Alan: {areaCm2.toFixed(1)} cm²</Text>
+                  </View>
+                  <View style={modal.infoChip}>
+                    <Icon name="straighten" size={14} color="#4A7C59" />
+                    <Text style={modal.infoChipText}>Tahmin: {estimatedGrams}g</Text>
+                  </View>
                 </View>
               )}
 
-              <Text style={styles.sectionLabel}>✏️ Manuel Düzenle</Text>
+              {/* Porsiyon başlık */}
+              <Text style={modal.sectionLabel}>Porsiyon Miktarını Ayarla</Text>
 
-              <Text style={styles.inputLabel}>Yemek Adı</Text>
-              <TextInput style={styles.input} value={editName} onChangeText={setEditName}
-                placeholder="Yemek adı" placeholderTextColor="#94a3b8" />
-
-              <View style={styles.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Kalori (kcal)</Text>
-                  <TextInput style={styles.input} value={editCal} onChangeText={setEditCal}
-                    keyboardType="numeric" placeholder="0" placeholderTextColor="#94a3b8" />
-                </View>
-                <View style={{ width: 12 }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Protein (g)</Text>
-                  <TextInput style={styles.input} value={editProtein} onChangeText={setEditProtein}
-                    keyboardType="numeric" placeholder="0" placeholderTextColor="#94a3b8" />
-                </View>
+              <View style={modal.portionDisplay}>
+                <Text style={modal.portionGrams}>{portionGrams}</Text>
+                <Text style={modal.portionUnit}>gr</Text>
               </View>
 
-              <View style={styles.row}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Karbonhidrat (g)</Text>
-                  <TextInput style={styles.input} value={editCarbs} onChangeText={setEditCarbs}
-                    keyboardType="numeric" placeholder="0" placeholderTextColor="#94a3b8" />
+              <View style={modal.sliderRow}>
+                <TouchableOpacity style={modal.portionBtn} onPress={() => adjustPortion(-25)}>
+                  <Icon name="remove" size={22} color="#141b0d" />
+                </TouchableOpacity>
+
+                <View style={modal.sliderTrack} {...panResponder.panHandlers}>
+                  <Animated.View
+                    style={[
+                      modal.sliderFill,
+                      {
+                        width: sliderAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: ['0%', '100%'],
+                        }),
+                      },
+                    ]}
+                  />
+                  <Animated.View
+                    style={[
+                      modal.sliderThumb,
+                      {
+                        left: sliderAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0, sliderWidth - 28],
+                        }),
+                      },
+                    ]}
+                  />
                 </View>
-                <View style={{ width: 12 }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>Yağ (g)</Text>
-                  <TextInput style={styles.input} value={editFat} onChangeText={setEditFat}
-                    keyboardType="numeric" placeholder="0" placeholderTextColor="#94a3b8" />
-                </View>
+
+                <TouchableOpacity style={modal.portionBtn} onPress={() => adjustPortion(25)}>
+                  <Icon name="add" size={22} color="#141b0d" />
+                </TouchableOpacity>
               </View>
 
-              <TouchableOpacity style={styles.applyBtn} onPress={applyEdit}>
-                <Icon name="check" size={22} color="#fff" />
-                <Text style={styles.applyText}>Değişiklikleri Uygula</Text>
-              </TouchableOpacity>
-              <View style={{ height: 30 }} />
+              {/* Hızlı seçenekler */}
+              <View style={modal.quickPortions}>
+                {[100, 150, 200, 300].map(g => (
+                  <TouchableOpacity
+                    key={g}
+                    style={[modal.quickBtn, portionGrams === g && modal.quickBtnActive]}
+                    onPress={() => { setPortionGrams(g); sliderAnim.setValue(gramsToSlider(g)); }}
+                  >
+                    <Text style={[modal.quickBtnText, portionGrams === g && modal.quickBtnTextActive]}>
+                      {g}g
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Kalori kartı */}
+              <View style={modal.calorieCard}>
+                <Text style={modal.calorieLabel}>Tahmini Değer ({portionGrams}g)</Text>
+                <Text style={modal.calorieVal}>
+                  {portionCalories} <Text style={modal.calorieUnit}>kcal</Text>
+                </Text>
+                <View style={modal.macroRow}>
+                  <Text style={modal.macroItem}>
+                    P: {Math.round(per100g.protein * portionGrams / 100 * 10) / 10}g
+                  </Text>
+                  <Text style={modal.macroDot}>•</Text>
+                  <Text style={modal.macroItem}>
+                    K: {Math.round(per100g.carbs * portionGrams / 100 * 10) / 10}g
+                  </Text>
+                  <Text style={modal.macroDot}>•</Text>
+                  <Text style={modal.macroItem}>
+                    Y: {Math.round(per100g.fat * portionGrams / 100 * 10) / 10}g
+                  </Text>
+                </View>
+                {/* 100g referans */}
+                <Text style={modal.per100Label}>
+                  Referans (100g): {per100g.calories} kcal
+                </Text>
+              </View>
+
+              <View style={{ height: 120 }} />
             </ScrollView>
+
+            <View style={modal.footer}>
+              <TouchableOpacity style={modal.applyBtn} onPress={applyEdit}>
+                <Icon name="check-circle" size={22} color="#0d1b0e" />
+                <Text style={modal.applyText}>Doğrula ve Kaydet</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
 };
 
+// ─── STİLLER ────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container:              { flex: 1, backgroundColor: '#f6f7f7' },
-  header:                 { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16 },
-  iconBtn:                { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
-  title:                  { fontSize: 18, fontWeight: '700', color: '#0f172a' },
-  imgArea:                { height: height * 0.35, padding: 20 },
-  bgImg:                  { width: '100%', height: '100%', overflow: 'hidden' },
-  overlay:                { flex: 1, padding: 25, justifyContent: 'space-between' },
-  cornersRow:             { flexDirection: 'row', justifyContent: 'space-between' },
-  corner:                 { width: 30, height: 30, borderColor: 'rgba(255,255,255,0.6)', borderRadius: 6 },
-  tag:                    { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.3)', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20 },
-  tagText:                { color: '#fff', fontSize: 10, fontWeight: '800' },
-  sheet:                  { flex: 1, backgroundColor: '#fff', borderTopLeftRadius: 40, borderTopRightRadius: 40, marginTop: -30, elevation: 15 },
-  handle:                 { width: 40, height: 5, backgroundColor: '#e2e8f0', borderRadius: 10, alignSelf: 'center', marginTop: 15 },
-  sheetContent:           { padding: 24 },
-  resultRow:              { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16, alignItems: 'center' },
-  aiBadge:                { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
-  aiText:                 { color: '#4A7C59', fontSize: 10, fontWeight: '900' },
-  foodName:               { fontSize: 28, fontWeight: '900', color: '#1e293b' },
-  kcalBox:                { backgroundColor: '#ecfdf5', padding: 12, borderRadius: 20, alignItems: 'center', borderWidth: 1, borderColor: '#d1fae5' },
-  kcalVal:                { fontSize: 22, fontWeight: '900', color: '#4A7C59' },
-  kcalUnit:               { fontSize: 10, color: '#4A7C59', fontWeight: '700', marginTop: -4 },
-  compareCard:            { backgroundColor: '#f8fafc', borderRadius: 24, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0' },
-  divider:                { height: 1, backgroundColor: '#e2e8f0', marginVertical: 8 },
-  sourceTitle:            { fontSize: 12, fontWeight: '700', color: '#64748b', marginTop: 8, marginBottom: 8 },
-  sourceRow:              { flexDirection: 'row', gap: 8 },
-  sourceBtn:              { flex: 1, paddingVertical: 8, borderRadius: 12, borderWidth: 1.5, borderColor: '#e2e8f0', alignItems: 'center', backgroundColor: '#fff' },
-  sourceBtnActivePurple:  { borderColor: '#6366f1', backgroundColor: '#eef2ff' },
-  sourceBtnActiveGreen:   { borderColor: '#4A7C59', backgroundColor: '#f0fdf4' },
-  sourceBtnActiveOrange:  { borderColor: '#f59e0b', backgroundColor: '#fffbeb' },
-  sourceBtnText:          { fontSize: 12, fontWeight: '700', color: '#94a3b8' },
-  macros:                 { flexDirection: 'row', gap: 10, marginBottom: 20 },
-  mBox:                   { flex: 1, backgroundColor: '#f8fafc', padding: 14, borderRadius: 20, alignItems: 'center', borderWidth: 1, borderColor: '#f1f5f9' },
-  mLabel:                 { color: '#94a3b8', fontSize: 11, fontWeight: '600' },
-  mVal:                   { color: '#1e293b', fontSize: 16, fontWeight: '700', marginTop: 4 },
-  btns:                   { flexDirection: 'row', gap: 12 },
-  editBtn:                { flex: 1, height: 58, borderRadius: 20, borderWidth: 1, borderColor: '#e2e8f0', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  btnEditText:            { fontWeight: '700', color: '#64748b', fontSize: 15 },
-  saveBtn:                { flex: 2, height: 58, borderRadius: 20, backgroundColor: '#32d411', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, elevation: 3 },
-  saveText:               { color: '#0d1b0e', fontWeight: '900', fontSize: 17 },
-  modalOverlay:           { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
-  modalSheet:             { backgroundColor: '#fff', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, maxHeight: height * 0.88 },
-  modalHeader:            { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  modalTitle:             { fontSize: 20, fontWeight: '800', color: '#1e293b' },
-  sectionLabel:           { fontSize: 12, fontWeight: '800', color: '#4A7C59', marginBottom: 8, marginTop: 8, textTransform: 'uppercase' },
-  searchBox:              { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8fafc', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#e2e8f0', gap: 8, marginBottom: 8 },
-  searchInput:            { flex: 1, fontSize: 15, color: '#1e293b' },
-  resultsBox:             { backgroundColor: '#f8fafc', borderRadius: 16, borderWidth: 1, borderColor: '#e2e8f0', marginBottom: 14, overflow: 'hidden' },
-  resultItem:             { flexDirection: 'row', alignItems: 'center', padding: 14, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
-  resultLabel:            { fontSize: 15, fontWeight: '700', color: '#1e293b' },
-  resultMacros:           { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  inputLabel:             { fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 6, marginTop: 10 },
-  input:                  { backgroundColor: '#f8fafc', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: '#1e293b', borderWidth: 1, borderColor: '#e2e8f0' },
-  row:                    { flexDirection: 'row', marginTop: 2 },
-  applyBtn:               { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#4A7C59', borderRadius: 20, paddingVertical: 16, marginTop: 20 },
-  applyText:              { color: '#fff', fontSize: 16, fontWeight: '800' },
+  container:           { flex: 1, backgroundColor: '#0d1b0e' },
+  heroImage:           { width: '100%', height: height * 0.58 },
+  heroOverlay:         { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.25)' },
+  header:              {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) + 8 : 0,
+  },
+  iconBtn:             {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  viewfinderContainer: { flex: 1, padding: 28, justifyContent: 'space-between', paddingBottom: 120, },
+  viewfinderRow:       { flexDirection: 'row', justifyContent: 'space-between' },
+  corner:              { width: 28, height: 28, borderColor: 'rgba(255,255,255,0.65)', borderRadius: 5 },
+  scanBadge:           { alignSelf: 'center', alignItems: 'center' },
+  scanBadgePulse:      {
+    position: 'absolute', width: 160, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(74,124,89,0.2)',
+    transform: [{ scaleX: 1.4 }, { scaleY: 1.4 }],
+  },
+  scanBadgeInner:      {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    paddingHorizontal: 16, paddingVertical: 9, borderRadius: 20,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+  },
+  scanText:            { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  confidenceBadge:     {
+    position: 'absolute', bottom: 50, left: 20,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.50)',
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 12,
+    borderWidth: 1,
+  },
+  confidenceText:      { fontSize: 12, fontWeight: '600' },
+  areaBadge:           {
+    position: 'absolute', bottom: 20, right: 20,
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.40)',
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+  },
+  areaText:            { color: '#94a3b8', fontSize: 11, fontWeight: '600' },
+  sheet:               {
+    flex: 1, backgroundColor: '#fff',
+    borderTopLeftRadius: 36, borderTopRightRadius: 36,
+    marginTop: -36, elevation: 20,
+    shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 20, shadowOffset: { width: 0, height: -4 },
+  },
+  handle:              {
+    width: 44, height: 5, backgroundColor: '#e2e8f0',
+    borderRadius: 10, alignSelf: 'center', marginTop: 14,
+  },
+  sheetContent:        { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 24 },
+  resultRow:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  aiBadge:             { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 3 },
+  aiText:              { color: '#4A7C59', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
+  foodName:            { fontSize: 26, fontWeight: '800', color: '#1e293b', lineHeight: 30 },
+  mealMeta:            { fontSize: 13, color: '#94a3b8', fontWeight: '500', marginTop: 2 },
+  kcalBox:             {
+    backgroundColor: '#ecfdf5', paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: 18, alignItems: 'center', borderWidth: 1, borderColor: '#d1fae5', minWidth: 70,
+  },
+  kcalVal:             { fontSize: 22, fontWeight: '900', color: '#4A7C59' },
+  kcalUnit:            { fontSize: 10, color: '#4A7C59', fontWeight: '700' },
+  macros:              { flexDirection: 'row', gap: 10, marginBottom: 20 },
+  mBox:                {
+    flex: 1, backgroundColor: '#f8fafc', paddingVertical: 12,
+    borderRadius: 18, alignItems: 'center', borderWidth: 1, borderColor: '#f1f5f9',
+  },
+  mLabel:              { color: '#94a3b8', fontSize: 11, fontWeight: '600' },
+  mVal:                { color: '#1e293b', fontSize: 16, fontWeight: '700', marginTop: 3 },
+  btns:                { flexDirection: 'row', gap: 12 },
+  editBtn:             {
+    flex: 1, height: 54, borderRadius: 18, borderWidth: 1.5, borderColor: '#e2e8f0',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#fff',
+  },
+  btnEditText:         { fontWeight: '700', color: '#64748b', fontSize: 14 },
+  saveBtn:             {
+    flex: 2, height: 54, borderRadius: 18, backgroundColor: '#32d411',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    elevation: 4, shadowColor: '#32d411', shadowOpacity: 0.35, shadowRadius: 8, shadowOffset: { width: 0, height: 3 },
+  },
+  saveText:            { color: '#0d1b0e', fontWeight: '900', fontSize: 16 },
+});
+
+const modal = StyleSheet.create({
+  overlay:         { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  sheet:           {
+    backgroundColor: '#F9FAF5', borderTopLeftRadius: 32, borderTopRightRadius: 32,
+    height: height * 0.92, overflow: 'hidden',
+  },
+  handle:          {
+    width: 44, height: 5, backgroundColor: '#dbe7cf',
+    borderRadius: 10, alignSelf: 'center', marginTop: 14, marginBottom: 4,
+  },
+  header:          {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 12,
+  },
+  backBtn:         {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  title:           { fontSize: 18, fontWeight: '800', color: '#141b0d' },
+  imgContainer:    { marginHorizontal: 20, marginBottom: 20 },
+  img:             {
+    width: '100%', aspectRatio: 4 / 3, borderRadius: 16,
+    overflow: 'hidden', justifyContent: 'flex-end',
+  },
+  imgOverlay:      {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.25)', borderRadius: 16,
+  },
+  imgBadge:        {
+    position: 'absolute', bottom: 14, left: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+  },
+  imgBadgeText:    { color: '#fff', fontSize: 12, fontWeight: '600' },
+  nameInputWrap:   { marginHorizontal: 20, marginBottom: 16, position: 'relative' },
+  nameInput:       {
+    backgroundColor: '#fff', borderRadius: 16,
+    paddingVertical: 14, paddingHorizontal: 16, paddingRight: 48,
+    fontSize: 18, fontWeight: '700', color: '#141b0d',
+    borderWidth: 1.5, borderColor: '#dbe7cf',
+    elevation: 2, shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4,
+  },
+  nameInputIcon:   { position: 'absolute', right: 16, top: 17 },
+  infoRow:         { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginBottom: 20 },
+  infoChip:        {
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#f0fdf4', borderRadius: 12,
+    paddingVertical: 8, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: '#d1fae5',
+  },
+  infoChipText:    { fontSize: 12, fontWeight: '700', color: '#4A7C59' },
+  sectionLabel:    {
+    fontSize: 11, fontWeight: '800', color: '#4A7C59',
+    textTransform: 'uppercase', letterSpacing: 0.8,
+    marginHorizontal: 20, marginBottom: 10,
+  },
+  portionDisplay:  {
+    flexDirection: 'row', alignItems: 'flex-end',
+    justifyContent: 'center', marginBottom: 20, gap: 8,
+  },
+  portionGrams:    { fontSize: 64, fontWeight: '900', color: '#141b0d', lineHeight: 68, letterSpacing: -2 },
+  portionUnit:     { fontSize: 24, fontWeight: '600', color: '#94a3b8', marginBottom: 8 },
+  sliderRow:       {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 20, gap: 12, marginBottom: 20,
+  },
+  portionBtn:      {
+    width: 48, height: 48, borderRadius: 24, backgroundColor: '#fff',
+    borderWidth: 1.5, borderColor: '#dbe7cf',
+    justifyContent: 'center', alignItems: 'center',
+    elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4,
+  },
+  sliderTrack:     {
+    flex: 1, height: 8, backgroundColor: '#e8efdf',
+    borderRadius: 4, position: 'relative', justifyContent: 'center',
+  },
+  sliderFill:      { position: 'absolute', left: 0, height: 8, backgroundColor: '#4A7C59', borderRadius: 4 },
+  sliderThumb:     {
+    position: 'absolute', width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#4A7C59', borderWidth: 4, borderColor: '#fff',
+    elevation: 5, shadowColor: '#4A7C59', shadowOpacity: 0.35, shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 }, top: -10,
+  },
+  quickPortions:   { flexDirection: 'row', gap: 8, marginHorizontal: 20, marginBottom: 20 },
+  quickBtn:        {
+    flex: 1, paddingVertical: 8, borderRadius: 12,
+    borderWidth: 1.5, borderColor: '#e8efdf',
+    alignItems: 'center', backgroundColor: '#fff',
+  },
+  quickBtnActive:      { borderColor: '#4A7C59', backgroundColor: '#4A7C59' },
+  quickBtnText:        { fontSize: 13, fontWeight: '700', color: '#94a3b8' },
+  quickBtnTextActive:  { color: '#fff' },
+  calorieCard:     {
+    marginHorizontal: 20, backgroundColor: '#eef5e6', borderRadius: 20,
+    padding: 20, alignItems: 'center',
+    borderWidth: 1.5, borderColor: '#dbe7cf', borderStyle: 'dashed',
+  },
+  calorieLabel:    { fontSize: 12, color: '#5c7a3c', fontWeight: '600', marginBottom: 6 },
+  calorieVal:      { fontSize: 40, fontWeight: '900', color: '#141b0d', letterSpacing: -1 },
+  calorieUnit:     { fontSize: 18, fontWeight: '600', color: '#5c7a3c' },
+  macroRow:        { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  macroItem:       { fontSize: 13, fontWeight: '700', color: '#5c7a3c' },
+  macroDot:        { fontSize: 13, color: '#9ab87c' },
+  per100Label:     { fontSize: 11, color: '#9ab87c', fontWeight: '500', marginTop: 8 },
+  footer:          {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    paddingHorizontal: 20,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 20,
+    paddingTop: 16,
+    backgroundColor: '#F9FAF5',
+    borderTopWidth: 1, borderTopColor: '#f0f0f0',
+  },
+  applyBtn:        {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    backgroundColor: '#4A7C59', borderRadius: 18, paddingVertical: 16,
+    elevation: 4, shadowColor: '#4A7C59', shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
+  },
+  applyText:       { color: '#fff', fontSize: 16, fontWeight: '800' },
 });
 
 export default AnalysisScreen;

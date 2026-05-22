@@ -63,9 +63,13 @@ const ProgressScreen = ({ navigation }: any) => {
     return { weekDays: days, currentMonthYear: monthYear };
   }, [weekOffset]);
 
-  useEffect(() => {
-    setSelectedFullDate(weekDays[0].fullDate);
-  }, [weekOffset]);
+ useEffect(() => {
+  if (weekOffset === 0) {
+    setSelectedFullDate(getLocalDate(new Date())); // Bu hafta → bugün
+  } else {
+    setSelectedFullDate(weekDays[0].fullDate); // Geçmiş haftalar → Pazartesi
+  }
+}, [weekOffset]);
 
   useEffect(() => {
     loadData();
@@ -197,6 +201,22 @@ const ProgressScreen = ({ navigation }: any) => {
           )}
         </View>
       </ScrollView>
+      {/* Alt Butonlar */}
+      <View style={styles.bottomButtons}>
+        <TouchableOpacity
+          style={styles.homeBtn}
+          onPress={() => navigation.navigate('Dashboard')}
+        >
+          <Text style={styles.homeBtnText}>🏠 Ana Sayfa</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.cameraBtn}
+          onPress={() => navigation.navigate('AICamera')}
+        >
+          <Text style={styles.cameraBtnText}>📷 Analiz Yap</Text>
+        </TouchableOpacity>
+      </View>
     </SafeAreaView>
   );
 };
@@ -228,7 +248,55 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 8,
     resizeMode: 'cover'
-  }
+  },
+  bottomButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+  },
+  homeBtn: {
+    flex: 1,
+    height: 50,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#dbe7cf',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  homeBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#4b7c5a',
+  },
+  cameraBtn: {
+    flex: 2,
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#4b7c5a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: '#4b7c5a',
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+  },
+  cameraBtnText: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#fff',
+  },
+  
 });
 
 export default ProgressScreen;
