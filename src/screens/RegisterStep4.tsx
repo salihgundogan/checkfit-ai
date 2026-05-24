@@ -11,13 +11,13 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 
-// Supabase ve Yardımcılar
 import { supabase } from '../lib/supabase';
 import { decode } from 'base64-arraybuffer';
 
 import StepHeader from '../components/StepHeader';
 import PrimaryButton from '../components/PrimaryButton';
 import ChipButton from '../components/ChipButton';
+import { useTheme } from './ThemeContext';
 
 const RegisterStep4 = () => {
   const navigation = useNavigation<any>();
@@ -27,9 +27,11 @@ const RegisterStep4 = () => {
   const [allergies, setAllergies] = useState<string[]>([]);
   const [conditions, setConditions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [isAgreed, setIsAgreed] = useState(false); // Onay kutusu durumu
-  const [showPrivacyModal, setShowPrivacyModal] = useState(false); // Gizlilik Modalı
-  const [showKvkkModal, setShowKvkkModal] = useState(false); // KVKK Modalı
+  const [isAgreed, setIsAgreed] = useState(false);
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+  const [showKvkkModal, setShowKvkkModal] = useState(false);
+
+  const { T, darkMode } = useTheme();
 
   const toggleSelection = (list: string[], setList: any, item: string) => {
     if (list.includes(item)) {
@@ -40,48 +42,41 @@ const RegisterStep4 = () => {
   };
 
   const handleFinish = async () => {
-    // Sözleşme onayı kontrolü
     if (!isAgreed) {
       Alert.alert('Onay Gerekli', 'Lütfen kayıt işlemine devam etmek için Gizlilik Sözleşmesi ve KVKK metnini onaylayın.');
       return;
     }
-
     if (loading) return;
     setLoading(true);
 
     try {
-      // 1. KULLANICI OLUŞTUR
       const { data: { user }, error: authError } = await supabase.auth.signUp({
         email: prevData.email,
         password: prevData.password,
       });
-
       if (authError) throw authError;
       if (!user) throw new Error("Kullanıcı oluşturulamadı ID bulunamadı.");
 
-      // 2. PROFİL RESMİNİ YÜKLE
       let avatarUrl = null;
       if (prevData.avatarBase64) {
-          try {
-              const fileName = `avatar_${Date.now()}.jpg`;
-              const filePath = `${user.id}/${fileName}`;
-              const { error: uploadError } = await supabase.storage
-                  .from('avatars')
-                  .upload(filePath, decode(prevData.avatarBase64), {
-                      contentType: 'image/jpeg',
-                      upsert: true
-                  });
-
-              if (!uploadError) {
-                  const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-                  avatarUrl = data.publicUrl;
-              }
-          } catch (imgErr) {
-              console.log('Resim işleme hatası:', imgErr);
+        try {
+          const fileName = `avatar_${Date.now()}.jpg`;
+          const filePath = `${user.id}/${fileName}`;
+          const { error: uploadError } = await supabase.storage
+            .from('avatars')
+            .upload(filePath, decode(prevData.avatarBase64), {
+              contentType: 'image/jpeg',
+              upsert: true
+            });
+          if (!uploadError) {
+            const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+            avatarUrl = data.publicUrl;
           }
+        } catch (imgErr) {
+          console.log('Resim işleme hatası:', imgErr);
+        }
       }
 
-      // 3. PROFİLİ KAYDET
       const { error: profileError } = await supabase.from('profiles').insert({
         id: user.id,
         full_name: prevData.fullName,
@@ -96,13 +91,11 @@ const RegisterStep4 = () => {
         conditions: conditions,
         avatar_url: avatarUrl,
       });
-
       if (profileError) throw profileError;
 
       Alert.alert('Tebrikler!', 'Hesabınız başarıyla oluşturuldu. Lütfen giriş yapınız.', [
-          { text: 'Giriş Yap', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'Login' }] }) }
+        { text: 'Giriş Yap', onPress: () => navigation.reset({ index: 0, routes: [{ name: 'Login' }] }) }
       ]);
-
     } catch (error: any) {
       console.error(error);
       Alert.alert('Kayıt Hatası', error.message || 'Bir sorun oluştu.');
@@ -111,10 +104,12 @@ const RegisterStep4 = () => {
     }
   };
 
+  const styles = makeStyles(T);
+
   return (
     <SafeAreaView style={styles.container}>
       <StepHeader currentStep={4} totalSteps={4} />
-      
+
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.headerTextContainer}>
           <Text style={styles.title}>Son Adım: Sağlık</Text>
@@ -128,7 +123,7 @@ const RegisterStep4 = () => {
             <ChipButton label="Gluten" icon="🍞" isSelected={allergies.includes('Gluten')} onPress={() => toggleSelection(allergies, setAllergies, 'Gluten')} />
             <ChipButton label="Fıstık" icon="🥜" isSelected={allergies.includes('Fıstık')} onPress={() => toggleSelection(allergies, setAllergies, 'Fıstık')} />
             <ChipButton label="Laktoz" icon="🥛" isSelected={allergies.includes('Laktoz')} onPress={() => toggleSelection(allergies, setAllergies, 'Laktoz')} />
-             <ChipButton label="Deniz Ürünleri" icon="🦐" isSelected={allergies.includes('Deniz')} onPress={() => toggleSelection(allergies, setAllergies, 'Deniz')} />
+            <ChipButton label="Deniz Ürünleri" icon="🦐" isSelected={allergies.includes('Deniz')} onPress={() => toggleSelection(allergies, setAllergies, 'Deniz')} />
           </View>
         </View>
 
@@ -143,15 +138,15 @@ const RegisterStep4 = () => {
           </View>
         </View>
 
-        {/* --- YASAL ONAY KUTUSU --- */}
+        {/* YASAL ONAY KUTUSU */}
         <View style={styles.agreementContainer}>
-          <TouchableOpacity 
-            style={[styles.checkbox, isAgreed && styles.checkboxChecked]} 
+          <TouchableOpacity
+            style={[styles.checkbox, isAgreed && styles.checkboxChecked]}
             onPress={() => setIsAgreed(!isAgreed)}
           >
             {isAgreed && <Text style={styles.checkIcon}>✓</Text>}
           </TouchableOpacity>
-          
+
           <View style={styles.agreementTextContainer}>
             <Text style={styles.agreementText}>
               Hesabımı oluşturarak{' '}
@@ -164,16 +159,14 @@ const RegisterStep4 = () => {
         </View>
 
         <View style={styles.footer}>
-          <PrimaryButton 
-            text={loading ? "Hesap Oluşturuluyor..." : "Hesabı Oluştur"} 
-            onPress={handleFinish} 
-            // Eğer isAgreed false ise butonu biraz soluklaştırabiliriz (opsiyonel stil)
+          <PrimaryButton
+            text={loading ? "Hesap Oluşturuluyor..." : "Hesabı Oluştur"}
+            onPress={handleFinish}
           />
         </View>
-
       </ScrollView>
 
-      {/* --- GİZLİLİK MODALI --- */}
+      {/* GİZLİLİK MODALI */}
       <Modal visible={showPrivacyModal} animationType="slide" presentationStyle="pageSheet">
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
@@ -185,7 +178,7 @@ const RegisterStep4 = () => {
           <ScrollView style={styles.modalScroll}>
             <Text style={styles.legalText}>
               **GİZLİLİK SÖZLEŞMESİ**{'\n\n'}
-              1. **Veri Toplama:** NutriLife ("Uygulama") olarak, hizmetlerimizi sunmak amacıyla adınız, e-posta adresiniz, doğum tarihiniz ve sağlık verileriniz (boy, kilo, aktivite düzeyi) gibi kişisel bilgilerinizi topluyoruz.{'\n\n'}
+              1. **Veri Toplama:** CheckFitAI ("Uygulama") olarak, hizmetlerimizi sunmak amacıyla adınız, e-posta adresiniz, doğum tarihiniz ve sağlık verileriniz (boy, kilo, aktivite düzeyi) gibi kişisel bilgilerinizi topluyoruz.{'\n\n'}
               2. **Veri Kullanımı:** Toplanan veriler, size özel diyet programları oluşturmak, kalori takibi sağlamak ve uygulama deneyimini kişiselleştirmek amacıyla kullanılır.{'\n\n'}
               3. **Veri Paylaşımı:** Kişisel verileriniz, yasal zorunluluklar haricinde üçüncü taraflarla paylaşılmaz.{'\n\n'}
               4. **Veri Güvenliği:** Verileriniz güvenli sunucularda saklanmakta olup, yetkisiz erişime karşı korunmaktadır.{'\n\n'}
@@ -195,7 +188,7 @@ const RegisterStep4 = () => {
         </SafeAreaView>
       </Modal>
 
-      {/* --- KVKK MODALI --- */}
+      {/* KVKK MODALI */}
       <Modal visible={showKvkkModal} animationType="slide" presentationStyle="pageSheet">
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
@@ -207,7 +200,7 @@ const RegisterStep4 = () => {
           <ScrollView style={styles.modalScroll}>
             <Text style={styles.legalText}>
               **KİŞİSEL VERİLERİN KORUNMASI KANUNU (KVKK) AYDINLATMA METNİ**{'\n\n'}
-              Veri sorumlusu sıfatıyla NutriLife olarak, 6698 sayılı Kişisel Verilerin Korunması Kanunu ("Kanun") uyarınca, kişisel verileriniz aşağıda açıklanan kapsamda işlenebilecektir.{'\n\n'}
+              Veri sorumlusu sıfatıyla CheckFitAI olarak, 6698 sayılı Kişisel Verilerin Korunması Kanunu ("Kanun") uyarınca, kişisel verileriniz aşağıda açıklanan kapsamda işlenebilecektir.{'\n\n'}
               **1. Kişisel Verilerin İşlenme Amacı:**{'\n'}
               Sağlık ve diyet hizmetlerinin yürütülmesi, kullanıcı kayıtlarının oluşturulması ve iletişim faaliyetlerinin yürütülmesi.{'\n\n'}
               **2. Kişisel Veri Toplama Yöntemi:**{'\n'}
@@ -219,40 +212,46 @@ const RegisterStep4 = () => {
           </ScrollView>
         </SafeAreaView>
       </Modal>
-
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f6f8f6' },
+const makeStyles = (T: any) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: T.bg },
   content: { padding: 24, paddingBottom: 100 },
   headerTextContainer: { marginBottom: 24 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#111811' },
-  optionalText: { fontSize: 18, color: '#9ca3af', fontWeight: '500', marginBottom: 8 },
-  subtitle: { fontSize: 16, color: '#6b7280', lineHeight: 24 },
+  title: { fontSize: 24, fontWeight: 'bold', color: T.text },
+  subtitle: { fontSize: 16, color: T.muted, lineHeight: 24 },
   section: { marginBottom: 24 },
-  sectionHeader: { fontSize: 16, fontWeight: '700', color: '#111811', marginBottom: 12 },
+  sectionHeader: { fontSize: 16, fontWeight: '700', color: T.text, marginBottom: 12 },
   chipContainer: { flexDirection: 'row', flexWrap: 'wrap' },
-  
-  // --- YASAL METİN STİLLERİ ---
+
+  // YASAL METİN STİLLERİ
   agreementContainer: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 32, marginTop: 8 },
-  checkbox: { width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: '#dce5dc', marginRight: 12, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' },
-  checkboxChecked: { backgroundColor: '#2f7f34', borderColor: '#2f7f34' },
+  checkbox: {
+    width: 24, height: 24, borderRadius: 6,
+    borderWidth: 2, borderColor: T.border,
+    marginRight: 12, justifyContent: 'center', alignItems: 'center',
+    backgroundColor: T.card,
+  },
+  checkboxChecked: { backgroundColor: T.primary, borderColor: T.primary },
   checkIcon: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
   agreementTextContainer: { flex: 1 },
-  agreementText: { fontSize: 13, color: '#6b7280', lineHeight: 20 },
-  linkText: { color: '#2f7f34', fontWeight: 'bold', textDecorationLine: 'underline' },
-  
+  agreementText: { fontSize: 13, color: T.muted, lineHeight: 20 },
+  linkText: { color: T.primary, fontWeight: 'bold', textDecorationLine: 'underline' },
+
   footer: { marginTop: 'auto', gap: 12 },
-  
-  // --- MODAL STİLLERİ ---
-  modalContainer: { flex: 1, backgroundColor: '#fff' },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#eee' },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#111811' },
-  closeText: { color: '#2f7f34', fontSize: 16, fontWeight: '600' },
+
+  // MODAL STİLLERİ
+  modalContainer: { flex: 1, backgroundColor: T.bg },
+  modalHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    padding: 20, borderBottomWidth: 1, borderBottomColor: T.border,
+  },
+  modalTitle: { fontSize: 18, fontWeight: 'bold', color: T.text },
+  closeText: { color: T.primary, fontSize: 16, fontWeight: '600' },
   modalScroll: { padding: 24 },
-  legalText: { fontSize: 14, color: '#333', lineHeight: 22, paddingBottom: 40 },
+  legalText: { fontSize: 14, color: T.text, lineHeight: 22, paddingBottom: 40 },
 });
 
 export default RegisterStep4;

@@ -124,7 +124,7 @@ const AnalysisScreen: React.FC<NativeStackScreenProps<any, 'Analysis'>> = ({ rou
 useEffect(() => {
   (async () => {
     try {
-      const modelFileName = 'mainmodel_v2.onnx';
+      const modelFileName = 'mainmodel_v4.onnx';
       const destPath = `${RNFS.DocumentDirectoryPath}/${modelFileName}`;
       
       // Debug: assets'te var mı kontrol et
